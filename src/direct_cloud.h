@@ -62,6 +62,7 @@ void cloudScreen(const String &state, const String &text) {
   }
   lcd.setClipRect(104, 0, 216, 140);
   printLocalizedText(106, 4, text.c_str(), language); lcd.clearClipRect();
+  boardPresent(true); // Show state changes before synchronous network requests.
 }
 bool cloudAwake() {
   return cloudAwakeDuration && millis() - cloudAwakeStart < cloudAwakeDuration;
@@ -214,7 +215,7 @@ String cloudReply(const String &text) {
 }
 bool cloudPlayPCM(const cloud_voice::PCM &pcm) {
   if (!pcm.bytes || pcm.bytes % 2 || pcm.rate < 8000 || pcm.rate > 48000) { cloudError = "Unsupported PCM format."; return false; }
-  digitalWrite(46, HIGH);
+  boardSpeakerEnable(true);
   const size_t sourceFrames = pcm.bytes / 2;
   const size_t outputFrames = sourceFrames * 16000ULL / pcm.rate;
   bool ok = true;
@@ -230,10 +231,10 @@ bool cloudPlayPCM(const cloud_voice::PCM &pcm) {
       stereo[n * 2] = stereo[n * 2 + 1] = value;
     }
     size_t sent = 0;
-    ok = i2s_channel_write(i2s.txChan(), stereo, count * 4, &sent, 200) == ESP_OK && sent == count * 4;
+    ok = boardAudioWrite(stereo, count * 4, &sent, 200) == ESP_OK && sent == count * 4;
     offset += count; delay(1);
   }
-  delay(110); digitalWrite(46, LOW);
+  delay(110); boardSpeakerEnable(false);
   if (!ok) cloudError = "Speaker I2S write failed.";
   return ok;
 }
@@ -342,7 +343,7 @@ void pollDirectCloud() {
   static bool lastAwake = false;
   if (lastAwake != cloudAwake()) { lastAwake = cloudAwake(); cloudIdleScreen(); }
   int16_t stereo[512]; size_t received = 0;
-  const esp_err_t status = i2s_channel_read(i2s.rxChan(), stereo, sizeof(stereo), &received, 0);
+  const esp_err_t status = boardAudioRead(stereo, sizeof(stereo), &received, 0);
   if (status != ESP_OK && status != ESP_ERR_TIMEOUT) { clearCloudCapture(); return; }
   const size_t frames = received / 4;
   if (!frames) return;
@@ -373,7 +374,7 @@ void pollDirectCloud() {
     clearCloudCapture();
     // Drain stale DMA samples after blocking HTTP/playback, avoiding self-wake.
     for (unsigned n = 0; n < 32; ++n) {
-      size_t drained = 0; i2s_channel_read(i2s.rxChan(), stereo, sizeof(stereo), &drained, 0);
+      size_t drained = 0; boardAudioRead(stereo, sizeof(stereo), &drained, 0);
       if (!drained) break;
     }
     if (cloudError.length()) { cloudScreen("error", cloudError); cloudNextAttempt = millis() + 5000; }

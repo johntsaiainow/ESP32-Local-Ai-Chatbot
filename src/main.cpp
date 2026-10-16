@@ -1,7 +1,11 @@
 #define LGFX_USE_V1
 #include <SD.h>
 #include <atomic>
+#if defined(OSIRIS_CORE_S3) || defined(OSIRIS_ATOM_S3R)
+#include <M5Unified.h>
+#else
 #include <LovyanGFX.hpp>
+#endif
 #include <Wire.h>
 #include <ESP_I2S.h>
 #include <SPI.h>
@@ -13,79 +17,7 @@
 #include <esp_rom_crc.h>
 #include <driver/i2s_std.h>
 
-constexpr int LCD_PIN_RESET = 48; // BOX-3 reset is active high, shared with touch.
-
-// --- Hardware configuration: LovyanGFX display and touch ---
-class LGFX : public lgfx::LGFX_Device {
-  lgfx::Panel_ILI9342  _panel_instance;
-  lgfx::Bus_SPI       _bus_instance;
-  lgfx::Light_PWM     _light_instance;
-  lgfx::Touch_GT911   _touch_instance;
-
-public:
-  LGFX(void) {
-    // Configure the SPI bus
-    auto cfg = _bus_instance.config();
-    cfg.spi_host = SPI2_HOST;
-    cfg.spi_mode = 0;
-    cfg.freq_write = 40000000;
-    cfg.freq_read  = 16000000;
-    cfg.spi_3wire  = true;
-    cfg.pin_sclk = 7;
-    cfg.pin_mosi = 6;
-    cfg.pin_miso = -1;
-    cfg.pin_dc   = 4;
-    _bus_instance.config(cfg);
-    _panel_instance.setBus(&_bus_instance);
-
-    // Configure the LCD panel (320x240)
-    auto p_cfg = _panel_instance.config();
-    p_cfg.pin_cs   = 5;
-    // Pulse the active-high reset in setup(); LGFX assumes active-low reset.
-    p_cfg.pin_rst  = -1;
-    p_cfg.pin_busy = -1;
-    p_cfg.panel_width  = 320;
-    p_cfg.panel_height = 240;
-    p_cfg.offset_x = 0;
-    p_cfg.offset_y = 0;
-    p_cfg.invert   = false;
-    p_cfg.readable = false; // The LCD has no MISO connection.
-    p_cfg.rgb_order = false;
-    _panel_instance.config(p_cfg);
-
-    // Configure the backlight
-    auto b_cfg = _light_instance.config();
-    b_cfg.pin_bl = 47;
-    b_cfg.invert = false;
-    b_cfg.freq   = 44100;
-    b_cfg.pwm_channel = 0;
-    _light_instance.config(b_cfg);
-    _panel_instance.setLight(&_light_instance);
-
-    // Configure touch I2C
-    auto t_cfg = _touch_instance.config();
-    t_cfg.x_min = 0;
-    t_cfg.x_max = 319;
-    t_cfg.y_min = 0;
-    t_cfg.y_max = 239;
-    // BOX-3 touch axes are mounted 180 degrees from the panel's native axes.
-    // Let LGFX combine this offset with lcd.setRotation(2) for all getTouch calls.
-    t_cfg.offset_rotation = 2;
-    t_cfg.pin_int = 3;
-    t_cfg.pin_rst = -1;
-    t_cfg.bus_shared = false;
-    t_cfg.i2c_port = I2C_NUM_0;
-    t_cfg.pin_sda = 8;
-    t_cfg.pin_scl = 18;
-    t_cfg.freq = 400000;
-    _touch_instance.config(t_cfg);
-    _panel_instance.setTouch(&_touch_instance);
-
-    setPanel(&_panel_instance);
-  }
-};
-
-LGFX lcd;
+#include "boards/display.h"
 
 WiFiManager wifiManager;
 #include "cloud_settings.h"
@@ -151,7 +83,7 @@ void setupWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.setSleep(false); // Avoid power-save wakeup latency for interactive audio.
-  setupSSID = "BOX3-Setup-" + WiFi.macAddress().substring(12);
+  setupSSID = String(BOARD_AP_PREFIX) + "-Setup-" + WiFi.macAddress().substring(12);
   setupSSID.replace(":", "");
   WiFi.begin(); // Reuse credentials stored by WiFiManager in NVS.
   wifiStarted = millis();
@@ -160,6 +92,17 @@ void setupWiFi() {
 
 // Poll before USB/audio early returns so Settings remains accessible in playback.
 void pollSettings() {
+  boardPollInput();
+  boardPresent();
+  if (boardButtonHeld()) {
+    if (wifiManager.getConfigPortalActive()) wifiManager.stopConfigPortal();
+    else enterSettingMode();
+    drawSettingsBar();
+  } else if (boardButtonPressed() && !directCloudEnabled() && hostHasUSB && hostHasWiFi &&
+             WiFi.status() == WL_CONNECTED && !wifiManager.getConfigPortalActive()) {
+    requestedWiFi = !requestedWiFi;
+    drawSettingsBar();
+  }
   wifiManager.process();
   if (wifiStartupPending) {
     if (WiFi.status() == WL_CONNECTED) wifiStartupPending = false;
@@ -279,140 +222,10 @@ void printLocalizedText(int x, int y, const char *text, DisplayLanguage language
   lcd.setFont(previousFont);
 }
 
-// BOX-3 SD slot: use SPI3 (HSPI); the LCD owns SPI2.
-constexpr int SD_PIN_SCLK = 11;
-constexpr int SD_PIN_MISO = 9;
-constexpr int SD_PIN_MOSI = 14;
-constexpr int SD_PIN_CS = 12;
-constexpr int SD_PIN_POWER = 43; // Active low.
-SPIClass sdSPI(HSPI);
-
-bool setupSD() {
-  pinMode(SD_PIN_POWER, OUTPUT);
-  digitalWrite(SD_PIN_POWER, LOW);
-  delay(100);
-  pinMode(SD_PIN_CS, OUTPUT);
-  digitalWrite(SD_PIN_CS, HIGH);
-  sdSPI.begin(SD_PIN_SCLK, SD_PIN_MISO, SD_PIN_MOSI, SD_PIN_CS);
-  if (!SD.begin(SD_PIN_CS, sdSPI, 1000000)) {
-    Serial.println("SD mount failed on BOX-3 pins; check card seating and filesystem.");
-    return false;
-  }
-  Serial.printf("SD mounted: %llu MB\n", SD.cardSize() / (1024ULL * 1024ULL));
-  return true;
-}
-
-// --- Audio hardware configuration: ES7210 and I2S ---
-#define I2C_SDA 8
-#define I2C_SCL 18
-#define ES7210_ADDR 0x40
-
-I2SClass i2s;
 bool audioReady = false;
 bool speakerReady = false;
 bool remoteDisplay = false;
-#define I2S_PIN_MCLK 2
-#define I2S_PIN_SCLK 17
-#define I2S_PIN_LRCK 45
-#define I2S_PIN_DIN  16
-
-bool initCodec() {
-  // Share LovyanGFX's I2C implementation with touch instead of installing
-  // a second driver on the same controller. ES7210: 16 kHz, MCLK = 256 * Fs,
-  // Standard 16-bit stereo data in 32-bit slots (64 BCLK per frame).
-  // Complete startup sequence from Espressif's BSP codec driver:
-  // https://github.com/espressif/esp-bsp/blob/master/components/es7210/es7210.c
-  if (!lgfx::i2c::init(I2C_NUM_0, I2C_SDA, I2C_SCL).has_value()) return false;
-  const uint8_t settings[][2] = {
-    {0x00, 0xFF}, {0x00, 0x32},
-    {0x09, 0x30}, {0x0A, 0x30},
-    {0x23, 0x2A}, {0x22, 0x0A}, {0x20, 0x0A}, {0x21, 0x2A},
-    {0x08, 0x10}, {0x40, 0xC3}, {0x41, 0x70}, {0x42, 0x70},
-    {0x07, 0x20}, {0x02, 0xC1}, {0x04, 0x01}, {0x05, 0x00},
-    {0x11, 0x60}, {0x12, 0x00},
-    {0x43, 0x18}, {0x44, 0x18}, {0x45, 0x18}, {0x46, 0x18},
-    {0x47, 0x08}, {0x48, 0x08}, {0x49, 0x08}, {0x4A, 0x08},
-    {0x4B, 0x0F}, {0x4C, 0x0F}, {0x06, 0x04}, {0x01, 0x20},
-    {0x00, 0x71}, {0x00, 0x41}
-  };
-  for (const auto &setting : settings) {
-    if (!lgfx::i2c::transactionWrite(I2C_NUM_0, ES7210_ADDR,
-                                    setting, sizeof(setting), 400000).has_value()) {
-      Serial.printf("ES7210 write failed: register 0x%02X, address 0x%02X\n",
-                    setting[0], ES7210_ADDR);
-      return false;
-    }
-  }
-  delay(100);
-  // Acknowledged writes alone do not prove that reset/configuration took effect.
-  const uint8_t expected[][2] = {
-    {0x00, 0x41}, {0x01, 0x20}, {0x02, 0xC1}, {0x08, 0x10},
-    {0x11, 0x60}, {0x12, 0x00}
-  };
-  for (const auto &entry : expected) {
-    uint8_t value = 0;
-    if (!lgfx::i2c::transactionWriteRead(I2C_NUM_0, ES7210_ADDR, entry, 1,
-                                        &value, 1, 400000).has_value() || value != entry[1]) {
-      Serial.printf("ES7210 verification failed: reg=%02X expected=%02X actual=%02X\n",
-                    entry[0], entry[1], value);
-      return false;
-    }
-  }
-  return true;
-}
-
-bool setupI2S() {
-  i2s.setTimeout(50);
-  i2s.setPins(I2S_PIN_SCLK, I2S_PIN_LRCK, 15, I2S_PIN_DIN, I2S_PIN_MCLK);
-  if (!i2s.begin(I2S_MODE_STD, 16000, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO)) {
-    Serial.println("Failed to initialize I2S!");
-    return false;
-  }
-  // Keep PCM buffers 16-bit, but provide a full 32-clock slot for each codec
-  // channel. Apply identical timing to TX/RX because they share BCLK and WS.
-  i2s_std_slot_config_t slots = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-      I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
-  slots.slot_bit_width = I2S_SLOT_BIT_WIDTH_32BIT;
-  slots.ws_width = 32;
-  // Recalculate BCLK after widening the slots; retaining the old divider can
-  // halve WS/sample rate while the WAV still declares 16000 Hz.
-  i2s_std_clk_config_t clocks = I2S_STD_CLK_DEFAULT_CONFIG(16000);
-  clocks.mclk_multiple = I2S_MCLK_MULTIPLE_256;
-  if (i2s_channel_disable(i2s.txChan()) != ESP_OK ||
-      i2s_channel_disable(i2s.rxChan()) != ESP_OK ||
-      i2s_channel_reconfig_std_slot(i2s.txChan(), &slots) != ESP_OK ||
-      i2s_channel_reconfig_std_slot(i2s.rxChan(), &slots) != ESP_OK ||
-      i2s_channel_reconfig_std_clock(i2s.txChan(), &clocks) != ESP_OK ||
-      i2s_channel_reconfig_std_clock(i2s.rxChan(), &clocks) != ESP_OK ||
-      i2s_channel_enable(i2s.txChan()) != ESP_OK ||
-      i2s_channel_enable(i2s.rxChan()) != ESP_OK) {
-    Serial.println("Failed to configure 32-bit I2S slots!");
-    i2s.end();
-    return false;
-  }
-  return true;
-}
-
-// ES8311 DAC: 16 kHz, 256x MCLK, standard 16-bit I2S; amplifier GPIO46.
-// Clock and power configuration follows the ESPHome ES8311 implementation.
-bool initSpeaker() {
-  pinMode(46, OUTPUT);
-  digitalWrite(46, LOW);
-  const uint8_t settings[][2] = {
-    {0x00, 0x1F}, {0x00, 0x00}, {0x01, 0x3F}, {0x02, 0x00},
-    {0x03, 0x10}, {0x04, 0x20}, {0x05, 0x00}, {0x06, 0x03},
-    {0x07, 0x00}, {0x08, 0xFF}, {0x09, 0x0C}, {0x0A, 0x0C},
-    {0x14, 0x1A}, {0x16, 0x00}, {0x17, 0xC8}, {0x32, 0xBF}, // DAC unity gain.
-    {0x0D, 0x01}, {0x0E, 0x02}, {0x12, 0x00}, {0x13, 0x10},
-    {0x1C, 0x6A}, {0x37, 0x08}, {0x31, 0x00}, {0x00, 0x80}
-  };
-  for (const auto &setting : settings) {
-    if (!lgfx::i2c::transactionWrite(I2C_NUM_0, 0x18, setting, 2, 400000).has_value()) {
-      return false;
-    }
-  }
-  return true;
-}
+#include "boards/audio.h"
 
 // Feed the meter from the same samples used for recording, without another
 // I2S read. This keeps it live while the synchronous USB handler owns capture.
@@ -457,6 +270,7 @@ void updateVolumeMeter(const int16_t *samples, size_t count, size_t stride = 2,
     windowPeak = 0;
     windowSamples = 0;
     lastDisplay = now;
+    boardPresent();
   }
 }
 
@@ -489,7 +303,7 @@ void playbackStreamTask(void *) {
     if (millis() - lastData > STREAM_IDLE_MS) { streamFailed = true; break; }
     delay(1);
   }
-  if (!streamStop && !streamFailed) digitalWrite(46, HIGH);
+  if (!streamStop && !streamFailed) boardSpeakerEnable(true);
   while (!streamStop && !streamFailed && streamRead < playExpected) {
     const size_t offset = streamRead.load();
     const size_t available = streamWritten.load() - offset;
@@ -515,7 +329,7 @@ void playbackStreamTask(void *) {
       stereo[i * 2] = stereo[i * 2 + 1] = sample;
     }
     size_t sent = 0;
-    const esp_err_t writeError = i2s_channel_write(i2s.txChan(), stereo, count * 4, &sent, 200);
+    const esp_err_t writeError = boardAudioWrite(stereo, count * 4, &sent, 200);
     if (writeError != ESP_OK || sent != count * 4) {
       streamFailed = true;
       break;
@@ -525,7 +339,7 @@ void playbackStreamTask(void *) {
   }
   if (waitingForAudio) streamStallMs = streamStallMs.load() + millis() - stallStarted;
   delay(110);
-  digitalWrite(46, LOW);
+  boardSpeakerEnable(false);
   streamDone = true;
   vTaskDelete(nullptr);
 }
@@ -547,7 +361,7 @@ void cancelPlayback() {
   free(playBuffer);
   playBuffer = nullptr;
   playExpected = playReceived = 0;
-  digitalWrite(46, LOW);
+  boardSpeakerEnable(false);
 }
 
 int hexDigit(char ch) {
@@ -626,7 +440,7 @@ void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs) {
     if (gate.started && millis() - speechAt > 12000) { error = ESP_ERR_TIMEOUT; break; }
     int16_t stereo[512];
     size_t received = 0;
-    error = i2s_channel_read(i2s.rxChan(), stereo, sizeof(stereo), &received, 100);
+    error = boardAudioRead(stereo, sizeof(stereo), &received, 100);
     if (received % 4 || (error != ESP_OK && error != ESP_ERR_TIMEOUT)) break;
     const size_t frames = received / 4;
     int total = 0;
@@ -900,7 +714,7 @@ void handleCommand(const String &line) {
       else protocolIO->println("BOX1 ERR stream_playback");
       return;
     }
-    digitalWrite(46, HIGH);
+    boardSpeakerEnable(true);
     bool ok = true;
     for (size_t offset = 0; offset < playExpected && ok;) {
       int16_t stereo[512];
@@ -910,7 +724,8 @@ void handleCommand(const String &line) {
                                                    playBuffer[offset + i * 2 + 1] << 8);
         stereo[i * 2] = stereo[i * 2 + 1] = sample;
       }
-      ok = i2s.write(reinterpret_cast<uint8_t *>(stereo), count * 4) == count * 4;
+      size_t sent = 0;
+      ok = boardAudioWrite(stereo, count * 4, &sent, 200) == ESP_OK && sent == count * 4;
       offset += count * 2;
       delay(1);
     }
@@ -933,7 +748,7 @@ void handleCommand(const String &line) {
       int16_t stereo[512];
       const size_t frames = min(static_cast<size_t>(256), (bytes - captured) / 2);
       size_t received = 0;
-      captureError = i2s_channel_read(i2s.rxChan(), stereo, frames * 4, &received, 100);
+      captureError = boardAudioRead(stereo, frames * 4, &received, 100);
       // IDF can return some valid data together with a timeout. Keep it and
       // retry rather than discarding all prior samples on a transient timeout.
       if (received % 4 || (captureError != ESP_OK && captureError != ESP_ERR_TIMEOUT)) break;
@@ -1054,21 +869,20 @@ void setup() {
   // command is over 1000 bytes; reserve room for the longest accepted line.
   Serial.setRxBufferSize(4096);
   Serial.begin(115200);
+  if (!psramFound()) {
+    Serial.println("Osiris requires PSRAM. Check the selected board and memory configuration.");
+    while (true) delay(1000);
+  }
 
   // 1. Initialize the display and backlight
-  pinMode(LCD_PIN_RESET, OUTPUT);
-  digitalWrite(LCD_PIN_RESET, HIGH);
-  delay(20);
-  digitalWrite(LCD_PIN_RESET, LOW);
-  delay(120);
-  const bool displayReady = lcd.init();
-  lcd.setRotation(2); // Rotate 180 degrees for the BOX-3 mounting orientation.
+  const bool displayReady = boardDisplayBegin();
   Serial.printf("LCD initialization: %s\n", displayReady ? "OK" : "FAILED");
+  if (!displayReady) { while (true) delay(1000); }
   lcd.setBrightness(128);
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
   lcd.setCursor(10, 10);
-  lcd.print("ESP32-S3-BOX-3 starting...");
+  lcd.printf("%s starting...", BOARD_NAME);
   lcd.fillRect(20, 210, 90, 10, TFT_RED);
   lcd.fillRect(110, 210, 90, 10, TFT_GREEN);
   lcd.fillRect(200, 210, 90, 10, TFT_BLUE);
@@ -1091,7 +905,7 @@ void setup() {
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
   lcd.setCursor(10, 10);
-  lcd.print("ESP32-S3-BOX-3 Ready");
+  lcd.printf("%s Ready", BOARD_NAME);
 
   lcd.setCursor(10, 30);
   lcd.print("Speak to test the microphone.");
@@ -1155,7 +969,8 @@ void loop() {
   // Keep the idle meter on the same microphone channel used for recordings.
   if (audioReady) {
     int16_t samples[512];
-    const size_t bytes = i2s.readBytes(reinterpret_cast<char *>(samples), sizeof(samples));
+    size_t bytes = 0;
+    boardAudioRead(samples, sizeof(samples), &bytes, 50);
     updateVolumeMeter(samples, bytes / sizeof(samples[0]));
   } else {
     updateVolumeMeter(nullptr, 0);

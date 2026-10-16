@@ -1,6 +1,10 @@
 # ESP32 Local AI Chatbot
 
-**An ESP32-S3-BOX-3 voice assistant with standalone cloud and host-assisted modes.**
+**Osiris: an ESP32-S3 voice assistant with standalone cloud and host-assisted modes.**
+
+Board targets now include BOX-3, LiChuang 实战派 SZPI ESP32-S3, CoreS3 and
+AtomS3R + Echo Base. New ports await physical hardware validation; see
+[board selection, build commands and limitations](docs/boards.md).
 
 Use the BOX-3 on its own with OpenAI or Gemini over Wi-Fi, or connect it over
 USB/TCP to a Linux/macOS host for Pi coding-agent integration and local speech
@@ -51,9 +55,9 @@ In host-assisted mode the device captures audio and displays responses; the host
 
 | Component | Requirement |
 | --- | --- |
-| Device | ESP32-S3-BOX-3 |
+| Device | BOX-3; new LiChuang S3, CoreS3 and AtomS3R + Echo Base ports ([details](docs/boards.md)) |
 | Firmware | Arduino framework via PlatformIO / pioarduino |
-| Display library | LovyanGFX |
+| Display library | LovyanGFX; M5GFX/M5Unified on M5Stack ports |
 | Host | Optional for standalone cloud; Linux/macOS for host-assisted operation |
 | Connection | Internet Wi-Fi for standalone cloud; USB or LAN TCP:8233 for host mode |
 | Power | USB power is still required during Wi-Fi operation |
@@ -62,7 +66,9 @@ In host-assisted mode the device captures audio and displays responses; the host
 | Music | mpv; ffmpeg alternative |
 | Audio format | 16 kHz, mono, signed 16-bit PCM WAV |
 
-The firmware is configured for the board's **16 MB flash partition layout** to accommodate bundled fonts. Flashing a new partition table may make existing filesystem contents incompatible.
+BOX-3, LiChuang S3 and CoreS3 use **16 MB flash layouts**. AtomS3R uses an
+**8 MB layout with one application slot** to fit bundled fonts. Flashing a new
+partition table may make existing filesystem contents incompatible.
 
 ## Repository layout
 
@@ -78,7 +84,8 @@ ESP32-Local-Ai-Chatbot/
 │   └── box3.ts
 ├── tests/                # Host, protocol, wake-word, and TCP tests
 ├── third_party/          # Emoji attribution and upstream licenses
-├── platformio.ini        # ESP32-S3-BOX-3 build configuration
+├── docs/boards.md        # Board selection, flashing and hardware validation
+├── platformio.ini        # Board-specific PlatformIO environments
 └── README.md
 ```
 
@@ -98,6 +105,10 @@ cd ESP32-Local-Ai-Chatbot
 pio run
 pio run --target upload
 ```
+
+These commands default to BOX-3. For other boards, specify `-e lichuang_s3`,
+`-e cores3` or `-e atoms3r_echo` for both build and upload. See the
+[board guide](docs/boards.md) before flashing; images are specific to each board.
 
 To inspect boot and hardware diagnostics:
 

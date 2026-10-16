@@ -4,7 +4,11 @@
 // https://github.com/tobozo/LGFX_Fonts
 // Copyright 2018 The Noto Project Authors. SIL OFL 1.1.
 // See third_party/lgfx_emojis/ for upstream notices and licenses.
+#if defined(OSIRIS_CORE_S3) || defined(OSIRIS_ATOM_S3R)
+#include <M5GFX.h>
+#else
 #include <LovyanGFX.hpp>
+#endif
 
 namespace box3_emoji {
 static const unsigned char u1F600_png_16x16[] = {
@@ -308,7 +312,7 @@ static const unsigned char u1F389_png_16x16[] = {
   0x15, 0x41, 0x42, 0x33, 0x62, 0x15, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 
   0x60, 0x82, 
 };
-inline bool draw16(lgfx::LGFX_Device &display, uint32_t code, int x, int y) {
+inline bool draw16(lgfx::LGFXBase &display, uint32_t code, int x, int y) {
   switch (code) {
     case 0x1F634: return display.drawPng(u1F634_png_16x16, sizeof(u1F634_png_16x16), x, y);
     case 0x231B: return display.drawPng(u231B_png_16x16, sizeof(u231B_png_16x16), x, y);
@@ -891,7 +895,7 @@ static const unsigned char u26A0_png_64x64[] = {
   0xe9, 0xe0, 0x23, 0xff, 0xf6, 0x6f, 0xd8, 0x2f, 0x4c, 0x17, 0x0f, 0xfd, 0x63, 0xcd, 0x00, 0x00, 
   0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82, 
 };
-inline bool draw64(lgfx::LGFX_Device &display, uint32_t code, int x, int y) {
+inline bool draw64(lgfx::LGFXBase &display, uint32_t code, int x, int y) {
   switch (code) {
     case 0x1F634: return display.drawPng(u1F634_png_64x64, sizeof(u1F634_png_64x64), x, y);
     case 0x231B: return display.drawPng(u231B_png_64x64, sizeof(u231B_png_64x64), x, y);
