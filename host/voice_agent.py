@@ -22,14 +22,19 @@ from offline_speech import create_recognizer, render_music, synthesize
 class WakeWordGate:
     """Gate recognized speech; a standalone wake phrase arms one next request."""
     def __init__(self, keyword='Osiris', timeout=15, clock=time.monotonic, followup_timeout=30):
-        self.keyword = keyword.strip().strip('!！.。 ').strip()
-        if not self.keyword:
-            raise ValueError('Wake word must contain text')
-        self.pattern = re.compile(r'(?<![A-Za-z0-9_])' + re.escape(self.keyword) +
-                                  r'(?![A-Za-z0-9_])', re.IGNORECASE)
         self.timeout = timeout
         self.followup_timeout = followup_timeout
         self.clock = clock
+        self.set_keyword(keyword)
+
+    def set_keyword(self, keyword):
+        keyword = keyword.strip(' \t\r\n!！.。,，?？:：;；')
+        if not keyword or not any(ch.isalnum() or ord(ch) >= 128 for ch in keyword) or len(keyword.encode('utf-8')) > 96 or any(
+                ord(ch) < 32 or ord(ch) == 127 for ch in keyword):
+            raise ValueError('Wake phrase must contain text and fit within 96 UTF-8 bytes')
+        self.keyword = keyword
+        self.pattern = re.compile(r'(?<![A-Za-z0-9_])' + re.escape(keyword) +
+                                  r'(?![A-Za-z0-9_])', re.IGNORECASE)
         self.reset()
 
     def reset(self):
@@ -65,6 +70,15 @@ class WakeWordGate:
             self.reset()
             return text
         return None
+
+
+def sync_wake_phrase(box, gate):
+    keyword = box.wake_phrase()
+    if keyword == gate.keyword:
+        return False
+    gate.set_keyword(keyword)
+    print(f'Wake phrase: {gate.keyword}', flush=True)
+    return True
 
 
 def show_wake_state(box, gate):
@@ -351,7 +365,7 @@ def main():
     parser.add_argument('--threshold', type=float, default=80)
     parser.add_argument('--silence', type=float, default=1.0)
     parser.add_argument('--keyboard-only', action='store_true')
-    parser.add_argument('--wake-word', default='Osiris', help='Wake phrase (default: Osiris)')
+    parser.add_argument('--wake-word', help='Override the device wake phrase (default: Settings value, or Osiris on older firmware)')
     parser.add_argument('--no-wake-word', action='store_true', help='Send spoken requests without waking first')
     parser.add_argument('--wake-timeout', type=float, default=15,
                         help='Seconds to accept a request after a standalone wake phrase (default: 15)')
@@ -387,7 +401,7 @@ def main():
         parser.error('Follow-up timeout must be 1..120 seconds')
     try:
         wake_gate = None if args.no_wake_word or args.keyboard_only else WakeWordGate(
-            args.wake_word, args.wake_timeout, followup_timeout=args.followup_timeout)
+            args.wake_word if args.wake_word is not None else 'Osiris', args.wake_timeout, followup_timeout=args.followup_timeout)
     except ValueError as exc:
         parser.error(str(exc))
     try:
@@ -403,6 +417,7 @@ def main():
     vad = VoiceActivity(args.threshold, args.silence)
     box = Box3Connection(endpoints, preferred)
     listening_announced = False
+    wake_next_poll = 0
     try:
         with tempfile.TemporaryDirectory(prefix='box3-agent-') as temp:
             session = Path(temp) / 'pi-session.jsonl'
@@ -411,12 +426,19 @@ def main():
             print('Firmware:', box.status, flush=True)
             print('BOX-3 voice agent ready. Listening is paused during Pi requests and playback.')
             while True:
-                if wake_gate is not None and wake_ui != wake_gate.waiting:
-                    wake_ui = show_wake_state(box, wake_gate)
                 try:
                     box.poll_transport()
                 except (RuntimeError, ValueError) as exc:
                     print('Transport switch:', exc, file=sys.stderr)
+                if wake_gate is not None and args.wake_word is None and time.monotonic() >= wake_next_poll:
+                    wake_next_poll = time.monotonic() + 2
+                    try:
+                        if sync_wake_phrase(box, wake_gate):
+                            wake_ui = None
+                    except (RuntimeError, ValueError) as exc:
+                        print('Wake setting:', exc, file=sys.stderr)
+                if wake_gate is not None and wake_ui != wake_gate.waiting:
+                    wake_ui = show_wake_state(box, wake_gate)
                 try:
                     text = commands.get(timeout=0.1) if args.keyboard_only else commands.get_nowait()
                     vad.reset()

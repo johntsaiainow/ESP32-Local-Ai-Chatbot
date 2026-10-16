@@ -70,7 +70,7 @@ bool cloudAwake() {
 void cloudArm(uint32_t duration) { cloudAwakeStart = millis(); cloudAwakeDuration = duration; }
 void cloudIdleScreen() {
   cloudScreen(cloudAwake() ? "listening" : "sleeping",
-              cloudAwake() ? "Awake! Ask a follow-up." : "Say Osiris!\nCloud voice ready.");
+              cloudAwake() ? String("Awake! Ask a follow-up.") : "Say " + wakePhrase + "!\nCloud voice ready.");
 }
 void clearCloudCapture() {
   cloudCaptured = 0; cloudCapturing = false; cloudSpeakingSeen = false;
@@ -294,7 +294,7 @@ void processCloudUtterance(bool alreadyAwake) {
   cloudError = ""; cloudScreen("thinking", "Transcribing speech...");
   String text = cloudTranscribe(); text.trim();
   if (!cloudError.isEmpty()) return;
-  const size_t wake = cloud_voice::wakeOffset(text.c_str());
+  const size_t wake = cloud_voice::wakeOffset(text.c_str(), wakePhrase.c_str());
   if (wake != SIZE_MAX) {
     text = text.substring(wake); text.trim();
     while (text.startsWith("!") || text.startsWith(",") || text.startsWith(":") || text.startsWith(".") ||

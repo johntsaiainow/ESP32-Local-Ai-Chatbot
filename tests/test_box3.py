@@ -126,6 +126,19 @@ class FakeSerial:
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_wake_phrase_uses_device_setting_and_legacy_default(self):
+        device = box3.Box3('fake', serial_factory=FakeSerial)
+        self.assertEqual(device.wake_phrase(), 'Osiris')
+        self.assertNotIn('BOX1 WAKE', device.serial.commands)
+        device.status += ' wake=1'
+        device.serial.inject = ('BOX1 OK wake_hex=' + '小智'.encode().hex() + '\n').encode()
+        self.assertEqual(device.wake_phrase(), '小智')
+        self.assertEqual(device.serial.commands[-1], 'BOX1 WAKE')
+        for value in ('', 'zz', 'ff', '00', '61' * 97):
+            device.serial.inject = ('BOX1 OK wake_hex=' + value + '\n').encode()
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                device.wake_phrase()
+
     def test_checked_audio_retry_never_duplicates_committed_samples(self):
         pcm = bytes(range(256)) * 4
         for fault in ('reject_once', 'wrong_ack'):

@@ -6,10 +6,31 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'host'))
-from voice_agent import WakeWordGate, listen_once, show_wake_state
+from voice_agent import WakeWordGate, listen_once, show_wake_state, sync_wake_phrase
 
 
 class WakeWordTests(unittest.TestCase):
+    def test_device_phrase_update_clears_existing_followup(self):
+        gate = WakeWordGate()
+        gate.arm_followup()
+        box = Mock()
+        box.wake_phrase.return_value = 'Hey Nova'
+        with patch('sys.stdout', io.StringIO()):
+            self.assertTrue(sync_wake_phrase(box, gate))
+        self.assertTrue(gate.waiting)
+        self.assertIsNone(gate.accept('Osiris, hello'))
+        self.assertEqual(gate.accept('HEY NOVA, hello'), 'hello')
+        gate.arm_followup()
+        self.assertFalse(sync_wake_phrase(box, gate))
+        self.assertFalse(gate.waiting)
+
+    def test_multilingual_and_bounded_custom_phrase(self):
+        self.assertEqual(WakeWordGate('小智').accept('小智，你好'), '你好')
+        self.assertEqual(WakeWordGate('ねえオシリス').accept('ねえオシリス！こんにちは'), 'こんにちは')
+        for value in ('', '___', 'a' * 97, '小' * 33, 'hello\x00world'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                WakeWordGate(value)
+
     def setUp(self):
         self.now = 100.0
         self.gate = WakeWordGate(clock=lambda: self.now)

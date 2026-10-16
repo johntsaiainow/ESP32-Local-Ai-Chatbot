@@ -1,10 +1,16 @@
 #pragma once
 #include <Preferences.h>
 #include <ArduinoJson.h>
+#include "wake_phrase.h"
 
 String cloudMode = "host", cloudOpenAIKey, cloudGeminiKey;
 String cloudChatModel, cloudSTTModel = "gpt-4o-mini-transcribe", cloudTTSModel, cloudVoice;
 bool cloudSettingsChanged = false;
+String wakePhrase = "Osiris", wakeSettingError;
+// Extra form capacity lets validation reject long multibyte input instead of
+// silently accepting a phrase truncated to a valid UTF-8 prefix.
+constexpr int WAKE_FORM_BYTES = 384;
+WiFiManagerParameter wakePhraseParam("wake_phrase", "Wake phrase (blank resets to Osiris; max 96 UTF-8 bytes)", "Osiris", WAKE_FORM_BYTES);
 String subscriptionAccess, subscriptionRefresh, subscriptionClient, subscriptionScope;
 int64_t subscriptionExpiry = 0, subscriptionEarliestRefresh = 0;
 String subscriptionCredentialError;
@@ -87,6 +93,9 @@ void loadCloudSettings() {
     cloudSTTModel = prefs.getString("stt", "gpt-4o-mini-transcribe");
     cloudTTSModel = prefs.getString("tts", "");
     cloudVoice = prefs.getString("voice", "");
+    std::string phrase;
+    const String saved = prefs.getString("wake_phrase", "Osiris");
+    wakePhrase = osiris_wake::normalize(saved.c_str(), phrase) ? phrase.c_str() : "Osiris";
     prefs.end();
   }
   cloudModeParam.setValue(cloudMode.c_str(), 8);
@@ -94,8 +103,15 @@ void loadCloudSettings() {
   sttModelParam.setValue(cloudSTTModel.c_str(), 96);
   ttsModelParam.setValue(cloudTTSModel.c_str(), 96);
   voiceParam.setValue(cloudVoice.c_str(), 64);
+  wakePhraseParam.setValue(wakePhrase.c_str(), WAKE_FORM_BYTES);
 }
 void saveCloudSettings() {
+  std::string phrase;
+  if (!osiris_wake::normalize(wakePhraseParam.getValue(), phrase)) {
+    wakeSettingError = "Wake phrase: use 1-96 UTF-8 bytes, without quotes or < > &.";
+    wakePhraseParam.setValue(wakePhrase.c_str(), WAKE_FORM_BYTES);
+    return;
+  }
   String mode = cloudModeParam.getValue(); mode.trim(); mode.toLowerCase();
   if (mode != "host" && mode != "openai" && mode != "gemini" && mode != "chatgpt") {
     Serial.println("Cloud mode must be host, openai, gemini, or chatgpt; settings not saved."); return;
@@ -108,7 +124,11 @@ void saveCloudSettings() {
   }
   Preferences prefs;
   if (!prefs.begin("cloud-voice", false)) return;
+  if (!prefs.putString("wake_phrase", phrase.c_str())) {
+    prefs.end(); wakeSettingError = "Could not save wake phrase. Please try again."; return;
+  }
   prefs.putString("mode", mode);
+  wakeSettingError = "";
   for (auto *param : {&openAIKeyParam, &geminiKeyParam}) {
     String key = param->getValue(); key.trim();
     if (key.length()) prefs.putString(param == &openAIKeyParam ? "openai_key" : "gemini_key", key == "-" ? "" : key);
@@ -123,6 +143,6 @@ void saveCloudSettings() {
 void setupCloudSettings() {
   loadCloudSettings(); loadSubscriptionCredentials();
   for (auto *param : {&cloudModeParam, &openAIKeyParam, &geminiKeyParam, &chatModelParam,
-                      &sttModelParam, &ttsModelParam, &voiceParam, &subscriptionNotice, &subscriptionParam}) wifiManager.addParameter(param);
+                      &sttModelParam, &ttsModelParam, &voiceParam, &wakePhraseParam, &subscriptionNotice, &subscriptionParam}) wifiManager.addParameter(param);
   wifiManager.setSaveParamsCallback(saveCloudSettings);
 }

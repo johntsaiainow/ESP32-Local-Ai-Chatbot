@@ -490,8 +490,12 @@ void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs) {
 
 void handleCommand(const String &line) {
   if (line == "BOX1 PING") {
-    protocolIO->printf("BOX1 OK mic=%d speaker=%d rate=16000 audio=pull1 capture=slot32-v3 playback=usbfast-v2 rx=4096 vad=1 upload=checked1 stream=ring1 streamrev=4 sync=1 face=1 emojistates=1 link=1 netchunk=%u netread=%u\n", audioReady, speakerReady,
+    protocolIO->printf("BOX1 OK mic=%d speaker=%d rate=16000 audio=pull1 capture=slot32-v3 playback=usbfast-v2 rx=4096 vad=1 upload=checked1 stream=ring1 streamrev=4 sync=1 face=1 emojistates=1 link=1 wake=1 netchunk=%u netread=%u\n", audioReady, speakerReady,
                        agentUsesWiFi ? 8192u : 0u, agentUsesWiFi ? 4096u : 0u);
+  } else if (line == "BOX1 WAKE") {
+    protocolIO->print("BOX1 OK wake_hex=");
+    for (unsigned char c : wakePhrase) protocolIO->printf("%02x", c);
+    protocolIO->println();
   } else if (line == "BOX1 LINK" || line.startsWith("BOX1 LINK ")) {
     if (line == "BOX1 LINK SET USB") requestedWiFi = false;
     else if (line == "BOX1 LINK SET WIFI") requestedWiFi = true;
@@ -932,13 +936,17 @@ void setup() {
 
 void loop() {
   pollSettings();
+  if (wakeSettingError.length()) {
+    cloudScreen("warning", wakeSettingError); wakeSettingError = "";
+  }
   if (subscriptionCredentialError.length()) {
     cloudScreen("error", subscriptionCredentialError);
     subscriptionCredentialError = "";
   }
   if (cloudSettingsChanged) {
     cloudSettingsChanged = false;
-    agentClient.stop(); cancelPlayback(); releaseRecording();
+    if (directCloudEnabled()) agentClient.stop();
+    cancelPlayback(); releaseRecording();
     resetDirectCloud(); drawSettingsBar();
   }
   if (directCloudEnabled()) {

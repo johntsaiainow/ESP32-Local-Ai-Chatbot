@@ -41,13 +41,16 @@ inline bool parseWav(const uint8_t *data, size_t bytes, PCM &pcm) {
 }
 inline bool wordByte(unsigned char ch) { return isalnum(ch) || ch == '_'; }
 // Returns the first byte after the whole wake word; SIZE_MAX means no match.
-inline size_t wakeOffset(const char *text) {
-  const size_t size = strlen(text); const char *word = "osiris";
-  for (size_t pos = 0; pos + 6 <= size; ++pos) {
+inline size_t wakeOffset(const char *text, const char *word = "Osiris") {
+  const size_t size = strlen(text), length = strlen(word);
+  if (!length) return SIZE_MAX;
+  for (size_t pos = 0; pos + length <= size; ++pos) {
     if (pos && wordByte((unsigned char)text[pos - 1])) continue;
     bool matches = true;
-    for (size_t n = 0; n < 6; ++n) if (tolower((unsigned char)text[pos + n]) != word[n]) matches = false;
-    if (matches && (pos + 6 == size || !wordByte((unsigned char)text[pos + 6]))) return pos + 6;
+    for (size_t n = 0; n < length; ++n) {
+      if (tolower((unsigned char)text[pos + n]) != tolower((unsigned char)word[n])) matches = false;
+    }
+    if (matches && (pos + length == size || !wordByte((unsigned char)text[pos + length]))) return pos + length;
   }
   return SIZE_MAX;
 }

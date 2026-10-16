@@ -291,7 +291,8 @@ Requests are sequential, acknowledged by `BOX1 OK`, or fail with `BOX1 ERR reaso
 
 | Request | Behavior |
 | --- | --- |
-| `PING` | Return codec readiness, sample rate, and `audio=pull1` capability |
+| `PING` | Return codec readiness, sample rate, and capabilities including `audio=pull1` and `wake=1` |
+| `WAKE` | Read the saved wake phrase as `wake_hex=<hex UTF-8>` (maximum 96 decoded bytes); no credentials are returned |
 | `TEXT <language> <hex UTF-8>` | Replace the upper display message (1024-byte limit) |
 | `RECORD <byte-count>` | Capture and retain PCM; acknowledge actual bytes, expected bytes, partial flag, elapsed time, and read error |
 | `LISTEN <threshold> <silence-ms> <wait-ms>` | Capture a variable utterance on-device; zero bytes means no onset before timeout |
@@ -468,9 +469,19 @@ poll for every received byte/loop, while preserving fragmented commands, USB
 framing, frame limits, and the existing 500 ms Wi-Fi prefill.
 
 
-## Wake phrase: Osiris!
+## Configurable wake phrase
 
-Spoken requests now require **Osiris** by default over USB or Wi-Fi:
+Spoken requests require the device's saved wake phrase (default **Osiris**)
+over USB or Wi-Fi. Change **Settings → Setup → Wake phrase** on the device,
+save, and exit Settings. The updated host checks for changes between listening
+turns; changing the phrase resets its current follow-up window. Blank in the
+portal restores `Osiris`. The setting persists across device restarts.
+
+`--wake-word 'Hey Nova'` overrides that setting for one host run. Older firmware
+without `wake=1` capability keeps the default `Osiris`; `--no-wake-word` disables
+host gating. Recognition uses transcription, not a trained local wake model.
+
+With the default phrase:
 
 - Say **“Osiris, what is the weather?”** in one utterance, or
 - Say **“Osiris!”**, wait for **Awake!** on the display, then speak one request
@@ -499,8 +510,8 @@ while waiting; requests only go to Pi after the wake phrase matches. Recognition
 accuracy and wake response time depend on the speech model and language setting;
 `--language auto` allows the English wake phrase with Chinese or English requests.
 It listens between requests, and remains paused during Pi processing and speaker
-playback. This change only requires restarting the updated host script; no new
-firmware is needed for wake gating.
+playback. A CLI-only phrase override works with older firmware; sharing the
+device Settings value requires the updated firmware and host script.
 
 
 ### Additional emoji expressions

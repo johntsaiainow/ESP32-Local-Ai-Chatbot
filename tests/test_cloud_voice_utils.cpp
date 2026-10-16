@@ -1,4 +1,5 @@
 #include "../src/cloud_voice_utils.h"
+#include "../src/wake_phrase.h"
 #include <assert.h>
 #include <vector>
 #include <stdio.h>
@@ -10,6 +11,25 @@ int main() {
   assert(wakeOffset("xOsiris") == SIZE_MAX);
   assert(wakeOffset("Osiris2") == SIZE_MAX);
   assert(wakeOffset("background speech") == SIZE_MAX);
+  assert(wakeOffset("Hey NOVA, hello", "Hey Nova") == 8);
+  assert(wakeOffset("Osiris, hello", "Nova") == SIZE_MAX);
+  assert(wakeOffset("Supernova", "Nova") == SIZE_MAX);
+  assert(wakeOffset("Nova2", "Nova") == SIZE_MAX);
+  assert(wakeOffset("小智，你好", "小智") == 6);
+  assert(wakeOffset("ねえオシリス！こんにちは", "ねえオシリス") == 18);
+  assert(wakeOffset("anything", "") == SIZE_MAX);
+  std::string phrase;
+  assert(osiris_wake::normalize("  Hey Nova!  ", phrase) && phrase == "Hey Nova");
+  assert(osiris_wake::normalize("小智！", phrase) && phrase == "小智");
+  assert(osiris_wake::normalize("   ", phrase) && phrase == "Osiris");
+  assert(!osiris_wake::normalize("!!!", phrase));
+  assert(!osiris_wake::normalize("___", phrase));
+  assert(!osiris_wake::normalize("Nova' onfocus='alert(1)", phrase));
+  assert(!osiris_wake::normalize("<Nova>", phrase));
+  assert(!osiris_wake::normalize("bad\x01word", phrase));
+  assert(!osiris_wake::normalize("\xE5\xB0", phrase));
+  assert(osiris_wake::normalize(std::string(96, 'a').c_str(), phrase));
+  assert(!osiris_wake::normalize(std::string(97, 'a').c_str(), phrase));
   std::vector<uint8_t> wave(44 + 3200);
   wavHeader(wave.data(), 3200);
   PCM pcm{};

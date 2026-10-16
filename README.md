@@ -18,7 +18,7 @@ on the provider or configured host backend, rather than on the ESP32 itself.
 - **Multilingual display:** English, Simplified Chinese, Traditional Chinese, Japanese, and Korean using bundled 16-pixel LovyanGFX efonts.
 - **Color emoji avatar:** LovyanGFX-rendered Noto emoji with a supported subset of inline icons and 13 state expressions, including sleeping while waiting for the wake phrase.
 - **USB or Wi-Fi transport:** display text, capture microphone audio, and play host-generated PCM audio; show the active transport and switch without losing the Pi session.
-- **Osiris wake phrase:** say “Osiris!” before a spoken request, with a 15-second follow-up window and sleeping/listening emoji feedback.
+- **Configurable wake phrase:** choose your phrase in Settings (default “Osiris”), with a 15-second initial request window and 30-second follow-up window after each reply.
 - **WiFi Manager:** saved Wi-Fi credentials, automatic setup hotspot on startup connection failure, and an on-screen Settings button.
 - **Offline speech processing:** faster-whisper for speech-to-text, OpenCC for Traditional Chinese conversion, and Piper for text-to-speech.
 - **Standalone cloud voice:** configure OpenAI or Gemini on the device; record, transcribe, chat, and speak without a Python host.
@@ -470,9 +470,28 @@ and Gemini's [Generate Content API](https://ai.google.dev/gemini-api/docs/genera
 For HTTP authentication, model-access, quota, or rate-limit errors, check the
 selected API account and model ID. No live cloud calls are made by the tests.
 
-## Wake phrase: Osiris!
+## Configurable wake phrase
 
 Spoken requests require **Osiris** by default in the host voice agent and standalone cloud mode:
+
+To change it on any supported board:
+
+1. Open **Settings → Setup** using the touchscreen or the board's Settings button.
+2. Enter **Wake phrase**, for example `Hey Nova`, `小智`, or `ねえオシリス`.
+3. Save and exit Settings. The value survives reboot; blank restores `Osiris`.
+
+Use at most **96 UTF-8 bytes** (up to 32 Chinese/Japanese characters); quotes
+and `< > &` are not accepted in the portal. Surrounding sentence punctuation is
+removed. English matching ignores case; non-ASCII text must match the transcript.
+Choose a phrase your speech recognizer transcribes consistently.
+
+Standalone OpenAI, Gemini and experimental subscription modes use the saved
+phrase immediately. The updated host agent reads it between listening turns
+and refreshes its wake prompt when it changes. A phrase change closes the old
+follow-up window. `--wake-word` overrides the device setting for that host run;
+`--no-wake-word` still disables host wake gating. Older firmware defaults to
+`Osiris` and supports the existing host override. Flash updated firmware and
+restart the updated host script to use shared device settings.
 
 - Say **“Osiris, what is the weather?”** in one utterance, or
 - Say **“Osiris!”**, wait for **Awake!** on the display, then speak one request
@@ -483,8 +502,8 @@ can ask a follow-up without repeating “Osiris!”. Each completed reply starts
 fresh 30-second window. If the window expires, the sleeping emoji returns and
 the wake phrase is required again. The standalone wake still allows 15 seconds
 for the first request. Unrelated speech is ignored while asleep. Keyboard prompts and `/transport` commands do not need a wake phrase.
-The spelling is **Osiris**; matching ignores case and does not require the
-exclamation mark.
+The default spelling is **Osiris**; the exclamation mark is optional.
+Substitute your saved phrase in the examples below.
 
 ```bash
 host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --language auto
@@ -501,8 +520,8 @@ while waiting; requests only go to Pi after the wake phrase matches. Recognition
 accuracy and wake response time depend on the speech model and language setting;
 `--language auto` allows the English wake phrase with Chinese or English requests.
 It listens between requests, and remains paused during Pi processing and speaker
-playback. This change only requires restarting the updated host script; no new
-firmware is needed for wake gating.
+playback. Wake phrases are matched against transcription; changing the setting
+does not train an on-device neural wake-word model.
 
 ## Multilingual display and emoji
 
@@ -646,7 +665,7 @@ Automated tests and successful compilation do not substitute for hardware verifi
 | Wi-Fi connection fails | Confirm the footer IP, same LAN, reachable TCP port 8233, and no other controller |
 | Switch button missing | Provide both `--port` and `--host`, connect Wi-Fi, and flash firmware with `link=1` |
 | Playback interruptions | Update host and firmware; check `Audio supply` counters and USB/Wi-Fi transfer health |
-| Wake phrase ignored | Say “Osiris!”, wait for Awake!, use `--language auto`; try `--no-wake-word` to isolate recognition |
+| Wake phrase ignored | Say the saved phrase (default “Osiris”), wait for Awake!, use `--language auto`; check any host `--wake-word` override |
 | Sleeping emoji missing | Restart the updated voice agent and flash firmware with `emojistates=1` |
 | Missing Chinese/Japanese/Korean glyphs | Select the correct display language and check bundled font coverage |
 | Speech model missing | Install matching Piper `.onnx` / `.onnx.json` files and confirm model paths |

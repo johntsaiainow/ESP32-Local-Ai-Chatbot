@@ -167,6 +167,20 @@ class Box3:
         raise TimeoutError(f'BOX-3 did not respond to {command.split()[0]} '
                            f'({len(packet)} command bytes); check firmware, port, and USB connection')
 
+    def wake_phrase(self):
+        """Read the user setting; older firmware keeps the original default."""
+        if self.reply_fields(self.status).get('wake') != '1':
+            return 'Osiris'
+        _, status = self.command('WAKE')
+        try:
+            encoded = bytes.fromhex(self.reply_fields(status)['wake_hex'])
+            phrase = encoded.decode('utf-8')
+            if not encoded or len(encoded) > 96 or '\0' in phrase:
+                raise ValueError('Invalid wake phrase')
+            return phrase
+        except (KeyError, ValueError, UnicodeError) as exc:
+            raise RuntimeError('Invalid device wake phrase response') from exc
+
     def expression(self, state):
         extra_states = {'sleeping': 'happy', 'waiting': 'thinking', 'surprised': 'happy',
                         'love': 'happy', 'success': 'happy', 'warning': 'error'}
