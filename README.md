@@ -2,6 +2,15 @@
 
 **Osiris: an ESP32-S3 voice assistant with standalone cloud and host-assisted modes.**
 
+**Desktop edition:** run Osiris as a PyQt6 application using your computer's
+microphone, speaker, and color emoji interface—no ESP32 required.
+See [desktop installation and usage](docs/desktop.md).
+
+```bash
+host/.venv/bin/python -m pip install -r host/requirements-desktop.txt
+host/.venv/bin/python host/desktop_osiris.py
+```
+
 ![Osiris promotional video — animated preview](docs/media/osiris-promotion.gif)
 
 10-second animated preview (silent). [Open or download the original MP4 with audio](https://github.com/johntsaiainow/ESP32-Local-Ai-Chatbot/raw/refs/heads/main/docs/media/osiris-promotion.mp4).
@@ -39,6 +48,7 @@ CoreS3, and this photo does not establish SE compatibility. See the
 
 ## Features
 
+- **PyQt6 desktop port:** computer microphone/speaker, streamed conversation, configurable wake phrase, color emoji states, and Pi/OpenAI/Gemini/OpenClaw backends. See [desktop setup](docs/desktop.md).
 - **ESP32-S3-BOX-3 interface:** built-in display, microphone, speaker, and audio-level meter.
 - **Multilingual display:** English, Simplified Chinese, Traditional Chinese, Japanese, and Korean using bundled 16-pixel LovyanGFX efonts.
 - **Color emoji avatar:** LovyanGFX-rendered Noto emoji with a supported subset of inline icons and 13 state expressions, including sleeping while waiting for the wake phrase.
