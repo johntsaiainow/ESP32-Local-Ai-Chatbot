@@ -2,9 +2,9 @@
 
 **Osiris: an ESP32-S3 voice assistant with standalone cloud and host-assisted modes.**
 
-[![Watch the Osiris promotional video](docs/media/osiris-promotion.jpg)](docs/media/osiris-promotion.mp4)
+![Osiris promotional video — animated preview](docs/media/osiris-promotion.gif)
 
-[Watch the promotional video](docs/media/osiris-promotion.mp4) · 10 seconds · MP4
+10-second animated preview (silent). [Open or download the original MP4 with audio](https://github.com/johntsaiainow/ESP32-Local-Ai-Chatbot/raw/refs/heads/main/docs/media/osiris-promotion.mp4).
 
 Board targets now include BOX-3, LiChuang 实战派 SZPI ESP32-S3, CoreS3,
 AtomS3R + Echo Base, and basic CrowPanel 7″ + external INMP441. New ports await
