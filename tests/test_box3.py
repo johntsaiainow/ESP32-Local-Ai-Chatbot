@@ -288,6 +288,16 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.box.expression('invalid\nCANCEL')
 
+    def test_extra_emoji_states_and_legacy_fallback(self):
+        self.box.status += ' face=1'
+        self.box.expression('sleeping')
+        self.assertEqual(self.box.serial.commands[-1], 'BOX1 FACE happy')
+        self.box.status += ' emojistates=1'
+        for state in ('sleeping', 'waiting', 'surprised', 'love', 'success', 'warning'):
+            with self.subTest(state=state):
+                self.box.expression(state)
+                self.assertEqual(self.box.serial.commands[-1], 'BOX1 FACE ' + state)
+
     def test_pause_capture_downloads_variable_length_audio(self):
         self.box.status += ' vad=1'
         self.box.serial.recording = bytes(range(256)) * 8

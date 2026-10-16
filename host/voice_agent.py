@@ -61,7 +61,7 @@ def show_wake_state(box, gate):
     waiting = gate.waiting
     message = (f'Say "{gate.keyword}!" to wake me.\nOr say wake word + request.' if waiting else
                f'Awake! Speak your request.\nWaiting up to {gate.timeout:g} seconds.')
-    box.expression('listening')
+    box.expression('sleeping' if waiting else 'listening')
     box.display(message, 'en')
     print(message.replace('\n', ' '), flush=True)
     return waiting
@@ -218,7 +218,7 @@ def conversation_pages(text, language, width=208, rows=6):
     def character_width(character):
         if character in ('\uFE0E', '\uFE0F') or unicodedata.combining(character):
             return 0
-        if ord(character) >= 0x1F000 or character in '\u2705\u274C\u26A0\u2764':
+        if ord(character) >= 0x1F000 or character in '\u231B\u2705\u274C\u26A0\u2764':
             return 18
         if ord(character) < 128:
             return 6 if language == 'en' else 8

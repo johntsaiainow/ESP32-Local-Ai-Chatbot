@@ -168,9 +168,14 @@ class Box3:
                            f'({len(packet)} command bytes); check firmware, port, and USB connection')
 
     def expression(self, state):
-        if state not in ('happy', 'sad', 'listening', 'thinking', 'speaking', 'music', 'error'):
+        extra_states = {'sleeping': 'happy', 'waiting': 'thinking', 'surprised': 'happy',
+                        'love': 'happy', 'success': 'happy', 'warning': 'error'}
+        if state not in ('happy', 'sad', 'listening', 'thinking', 'speaking', 'music', 'error') and state not in extra_states:
             raise ValueError('Unsupported agent expression')
-        if self.reply_fields(self.status).get('face') == '1':
+        fields = self.reply_fields(self.status)
+        if fields.get('face') == '1':
+            if fields.get('emojistates') != '1':
+                state = extra_states.get(state, state)
             self.command('FACE ' + state)
 
     def display(self, text, language='en'):

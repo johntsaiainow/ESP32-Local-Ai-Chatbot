@@ -71,9 +71,11 @@ class WakeWordTests(unittest.TestCase):
         with patch('sys.stdout', io.StringIO()):
             self.assertTrue(show_wake_state(box, self.gate))
             self.assertIn('Osiris!', box.display.call_args.args[0])
+            box.expression.assert_called_with('sleeping')
             self.gate.accept('Osiris')
             self.assertFalse(show_wake_state(box, self.gate))
             self.assertIn('Awake!', box.display.call_args.args[0])
+            box.expression.assert_called_with('listening')
 
     def test_idle_wake_listening_preserves_wake_screen(self):
         box = Mock()

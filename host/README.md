@@ -491,3 +491,13 @@ accuracy and wake response time depend on the speech model and language setting;
 It listens between requests, and remains paused during Pi processing and speaker
 playback. This change only requires restarting the updated host script; no new
 firmware is needed for wake gating.
+
+
+### Additional emoji expressions
+
+`Box3.expression(state)` and `BOX1 FACE state` now also support `sleeping` 😴,
+`waiting` ⌛, `surprised` 😮, `love` 🥰, `success` 🎉, and `warning` ⚠️.
+The voice agent automatically shows sleeping while waiting for the wake word,
+and listening after waking. New firmware advertises `emojistates=1`; the Python
+client uses compatible older expressions if that capability is absent.
+The same artwork is included in the supported inline emoji set at 16×16.

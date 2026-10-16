@@ -7,6 +7,7 @@
 #include <SPI.h>
 #include <WiFiManager.h>
 #include "utf8.h"
+#include "emoji_assets.h"
 #include "serial_write.h"
 #include "speech_gate.h"
 #include <esp_rom_crc.h>
@@ -186,113 +187,46 @@ void pollSettings() {
   }
 }
 
-// Compact color emoji artwork for common agent and audio status messages.
-// Unsupported supplementary-plane symbols use a visible placeholder.
+// Render the same Noto color PNG emoji used by LovyanGFX's emoji example.
 bool drawEmoji(uint32_t codepoint, int x, int y) {
-  switch (codepoint) {
-    case 0x1F600: // Grinning face
-    case 0x1F642: // Slightly smiling face
-    case 0x1F914: // Thinking face
-      lcd.fillCircle(x + 8, y + 8, 7, TFT_YELLOW);
-      lcd.fillCircle(x + 5, y + 6, 1, TFT_BLACK);
-      lcd.fillCircle(x + 11, y + 6, 1, TFT_BLACK);
-      if (codepoint == 0x1F914) {
-        lcd.drawLine(x + 5, y + 11, x + 10, y + 10, TFT_BLACK);
-        lcd.fillCircle(x + 12, y + 13, 2, TFT_ORANGE);
-      } else {
-        lcd.drawLine(x + 4, y + 10, x + 6, y + 12, TFT_BLACK);
-        lcd.drawLine(x + 6, y + 12, x + 10, y + 12, TFT_BLACK);
-        lcd.drawLine(x + 10, y + 12, x + 12, y + 10, TFT_BLACK);
-      }
-      return true;
-    case 0x1F916: // Robot
-      lcd.fillRoundRect(x + 1, y + 3, 14, 12, 2, TFT_LIGHTGREY);
-      lcd.drawLine(x + 8, y, x + 8, y + 3, TFT_WHITE);
-      lcd.fillRect(x + 4, y + 6, 2, 3, TFT_BLUE);
-      lcd.fillRect(x + 10, y + 6, 2, 3, TFT_BLUE);
-      lcd.drawLine(x + 5, y + 12, x + 11, y + 12, TFT_BLACK);
-      return true;
-    case 0x1F3A4: // Microphone
-      lcd.fillRoundRect(x + 5, y + 1, 6, 9, 3, TFT_LIGHTGREY);
-      lcd.drawLine(x + 3, y + 8, x + 5, y + 12, TFT_WHITE);
-      lcd.drawLine(x + 5, y + 12, x + 11, y + 12, TFT_WHITE);
-      lcd.drawLine(x + 11, y + 12, x + 13, y + 8, TFT_WHITE);
-      lcd.drawLine(x + 8, y + 12, x + 8, y + 15, TFT_WHITE);
-      return true;
-    case 0x1F50A: // Speaker
-      lcd.fillRect(x + 1, y + 6, 4, 5, TFT_WHITE);
-      lcd.fillTriangle(x + 4, y + 6, x + 9, y + 2, x + 9, y + 14, TFT_WHITE);
-      lcd.drawLine(x + 12, y + 5, x + 14, y + 8, TFT_CYAN);
-      lcd.drawLine(x + 14, y + 8, x + 12, y + 11, TFT_CYAN);
-      return true;
-    case 0x2705: // Check mark
-      lcd.fillRoundRect(x, y, 16, 16, 2, TFT_DARKGREEN);
-      lcd.drawLine(x + 3, y + 8, x + 6, y + 12, TFT_WHITE);
-      lcd.drawLine(x + 6, y + 12, x + 13, y + 4, TFT_WHITE);
-      return true;
-    case 0x274C: // Cross mark
-      lcd.drawLine(x + 3, y + 3, x + 13, y + 13, TFT_RED);
-      lcd.drawLine(x + 13, y + 3, x + 3, y + 13, TFT_RED);
-      return true;
-    case 0x26A0: // Warning
-      lcd.fillTriangle(x + 8, y, x, y + 15, x + 15, y + 15, TFT_YELLOW);
-      lcd.fillRect(x + 7, y + 5, 2, 5, TFT_BLACK);
-      lcd.fillRect(x + 7, y + 12, 2, 2, TFT_BLACK);
-      return true;
-    case 0x2764: // Heart
-      lcd.fillCircle(x + 4, y + 5, 4, TFT_RED);
-      lcd.fillCircle(x + 11, y + 5, 4, TFT_RED);
-      lcd.fillTriangle(x, y + 6, x + 15, y + 6, x + 8, y + 15, TFT_RED);
-      return true;
-    default: return false;
-  }
+  return box3_emoji::draw16(lcd, codepoint, x, y);
 }
 
-// Large status avatar stays beside the conversation; inline emoji remain small.
+// State-driven redraws avoid a continuous animation task competing with audio.
 String agentExpression = "happy";
+struct AgentEmoji { const char *state; uint32_t code; };
+constexpr AgentEmoji AGENT_EMOJIS[] = {
+  {"happy", 0x1F600}, {"listening", 0x1F442}, {"thinking", 0x1F914},
+  {"speaking", 0x1F603}, {"music", 0x1F60E}, {"sad", 0x1F622}, {"error", 0x1F635},
+  {"sleeping", 0x1F634},
+  {"waiting", 0x231B},
+  {"surprised", 0x1F62E},
+  {"love", 0x1F970},
+  {"success", 0x1F389},
+  {"warning", 0x26A0},
+};
+uint32_t agentEmojiCode(const String &state) {
+  for (const auto &entry : AGENT_EMOJIS) {
+    if (state == entry.state) return entry.code;
+  }
+  return 0;
+}
+
 void drawAgentFace() {
+  const lgfx::IFont *previousFont = lcd.getFont();
+  lcd.setFont(&fonts::Font0);
   lcd.fillRect(0, 0, 100, 140, TFT_BLACK);
+  lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+  lcd.setCursor(29, 8);
+  lcd.print("Osiris");
+  const uint32_t emoji = agentEmojiCode(agentExpression);
+  box3_emoji::draw64(lcd, emoji, 18, 31);
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-  lcd.setCursor(12, 4);
-  lcd.print("Pi Agent");
-  const bool error = agentExpression == "error";
-  const bool thinking = agentExpression == "thinking";
-  const bool speaking = agentExpression == "speaking";
-  const bool music = agentExpression == "music";
-  const bool sad = agentExpression == "sad";
-  const uint16_t color = error ? TFT_RED : thinking ? TFT_YELLOW : TFT_CYAN;
-  lcd.fillRoundRect(8, 32, 84, 70, 15, color);
-  lcd.drawLine(50, 20, 50, 31, color);
-  lcd.fillCircle(50, 19, 4, color);
-  lcd.fillRoundRect(16, 40, 68, 48, 10, TFT_BLACK);
-  if (music || agentExpression == "happy") {
-    lcd.drawLine(26, 57, 32, 51, color);
-    lcd.drawLine(32, 51, 38, 57, color);
-    lcd.drawLine(62, 57, 68, 51, color);
-    lcd.drawLine(68, 51, 74, 57, color);
-  } else if (error) {
-    for (int x : {26, 62}) {
-      lcd.drawLine(x, 49, x + 12, 61, color);
-      lcd.drawLine(x + 12, 49, x, 61, color);
-    }
-  } else {
-    lcd.fillRoundRect(27, thinking ? 52 : 48, 10, thinking ? 4 : 15, 3, color);
-    lcd.fillRoundRect(63, 48, 10, 15, 3, color);
-  }
-  if (speaking || music) lcd.fillRoundRect(39, 68, 22, 13, 6, color);
-  else if (sad || error) {
-    lcd.drawLine(37, 79, 44, 73, color);
-    lcd.drawLine(44, 73, 56, 73, color);
-    lcd.drawLine(56, 73, 63, 79, color);
-  } else if (thinking) lcd.fillRect(40, 74, 20, 3, color);
-  else {
-    lcd.drawLine(36, 70, 43, 77, color);
-    lcd.drawLine(43, 77, 57, 77, color);
-    lcd.drawLine(57, 77, 64, 70, color);
-  }
-  lcd.setCursor(10, 112);
+  const int labelX = (100 - lcd.textWidth(agentExpression)) / 2;
+  lcd.setCursor(labelX, 111);
   lcd.print(agentExpression);
   lcd.drawFastVLine(100, 0, 140, TFT_DARKGREY);
+  lcd.setFont(previousFont);
 }
 
 // Select a font explicitly for each language. Text arguments use UTF-8.
@@ -316,7 +250,7 @@ void printLocalizedText(int x, int y, const char *text, DisplayLanguage language
       lcd.setCursor(x, lcd.getCursorY() + 18);
       continue;
     }
-    const bool emoji = codepoint >= 0x1F000 || codepoint == 0x2705 ||
+    const bool emoji = codepoint >= 0x1F000 || codepoint == 0x231B || codepoint == 0x2705 ||
                        codepoint == 0x274C || codepoint == 0x26A0 || codepoint == 0x2764;
     const int width = emoji ? 18 : lcd.textWidth(String(start, text - start));
     if (lcd.getCursorX() + width > lcd.width()) {
@@ -737,7 +671,7 @@ void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs) {
 
 void handleCommand(const String &line) {
   if (line == "BOX1 PING") {
-    protocolIO->printf("BOX1 OK mic=%d speaker=%d rate=16000 audio=pull1 capture=slot32-v3 playback=usbfast-v2 rx=4096 vad=1 upload=checked1 stream=ring1 streamrev=4 sync=1 face=1 link=1 netchunk=%u netread=%u\n", audioReady, speakerReady,
+    protocolIO->printf("BOX1 OK mic=%d speaker=%d rate=16000 audio=pull1 capture=slot32-v3 playback=usbfast-v2 rx=4096 vad=1 upload=checked1 stream=ring1 streamrev=4 sync=1 face=1 emojistates=1 link=1 netchunk=%u netread=%u\n", audioReady, speakerReady,
                        agentUsesWiFi ? 8192u : 0u, agentUsesWiFi ? 4096u : 0u);
   } else if (line == "BOX1 LINK" || line.startsWith("BOX1 LINK ")) {
     if (line == "BOX1 LINK SET USB") requestedWiFi = false;
@@ -768,8 +702,7 @@ void handleCommand(const String &line) {
     listenForSpeech(threshold, silenceMs, waitMs);
   } else if (line.startsWith("BOX1 FACE ")) {
     const String expression = line.substring(10);
-    if (expression != "happy" && expression != "sad" && expression != "listening" &&
-        expression != "thinking" && expression != "speaking" && expression != "music" && expression != "error") {
+    if (!agentEmojiCode(expression)) {
       protocolIO->println("BOX1 ERR expression"); return;
     }
     agentExpression = expression;
