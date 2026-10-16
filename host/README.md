@@ -408,6 +408,12 @@ The voice agent shows listening, thinking, speaking, music and error states.
 Listening and recognition updates preserve the last dialogue page. These are
 static state expressions, not inferred LLM emotions or lip synchronization.
 
+The voice agent keeps one Pi RPC process alive across requests and prepares
+configured Piper voices before listening. `--pi-one-shot` uses a separate Pi
+JSON CLI process for each request; `--no-tts-warmup` loads voices on first use.
+Use these flags for compatibility or timing comparisons. See
+[voice latency](../docs/voice-latency.md) for measurements and limitations.
+
 Pi extensions are enabled by default so configured weather/web tools can be used
 from BOX-3 conversations. `--pi-no-extensions` restores isolated operation for
 troubleshooting. The Pi subprocess excludes `box3_*`, `get_room_temperature`,

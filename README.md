@@ -2,9 +2,16 @@
 
 **Osiris: an ESP32-S3 voice assistant with standalone cloud and host-assisted modes.**
 
-Board targets now include BOX-3, LiChuang 实战派 SZPI ESP32-S3, CoreS3 and
-AtomS3R + Echo Base. New ports await physical hardware validation; see
+[![Watch the Osiris promotional video](docs/media/osiris-promotion.jpg)](docs/media/osiris-promotion.mp4)
+
+[Watch the promotional video](docs/media/osiris-promotion.mp4) · 10 seconds · MP4
+
+Board targets now include BOX-3, LiChuang 实战派 SZPI ESP32-S3, CoreS3,
+AtomS3R + Echo Base, and basic CrowPanel 7″ + external INMP441. New ports await
+physical hardware validation; see
 [board selection, build commands and limitations](docs/boards.md).
+CrowPanel microphone wiring and its 4 MB flash layout are covered in the
+[CrowPanel guide](docs/crowpanel7.md).
 
 Use the BOX-3 on its own with OpenAI or Gemini over Wi-Fi, or connect it over
 USB/TCP to a Linux/macOS host for Pi coding-agent integration and local speech
@@ -22,9 +29,11 @@ on the provider or configured host backend, rather than on the ESP32 itself.
 - **WiFi Manager:** saved Wi-Fi credentials, automatic setup hotspot on startup connection failure, and an on-screen Settings button.
 - **Offline speech processing:** faster-whisper for speech-to-text, OpenCC for Traditional Chinese conversion, and Piper for text-to-speech.
 - **Standalone cloud voice:** configure OpenAI or Gemini on the device; record, transcribe, chat, and speak without a Python host.
-- **Host-assisted providers:** Pi coding agent by default, with optional OpenAI/Gemini text adapters in the host script.
+- **OpenClaw integration:** connect the ESP32 directly to your Gateway over Wi-Fi, or use host-side local speech. See [setup and connection options](docs/openclaw.md).
+- **Host-assisted providers:** Pi coding agent by default, with optional OpenAI/Gemini/OpenClaw text adapters in the host script.
 - **Pi coding-agent integration:** optional Pi extension tools and a standalone conversational voice agent.
 - **Local music playback:** decode files from a local music directory with mpv and stream them to the BOX-3 speaker.
+- **Lower voice latency:** streamed model text, sentence speech queues, PCM playback during download, persistent Pi RPC, startup Piper warmup, and per-stage timing logs. See [latency settings and measurement](docs/voice-latency.md).
 - **Robust audio transport:** offset and CRC32 validation, retries, synchronization, and PSRAM-buffered continuous playback on compatible firmware.
 - **Linux-first workflow:** PlatformIO, Python virtual environments, and terminal-based diagnostics.
 
@@ -55,7 +64,7 @@ In host-assisted mode the device captures audio and displays responses; the host
 
 | Component | Requirement |
 | --- | --- |
-| Device | BOX-3; new LiChuang S3, CoreS3 and AtomS3R + Echo Base ports ([details](docs/boards.md)) |
+| Device | BOX-3; LiChuang S3, CoreS3, AtomS3R + Echo Base and CrowPanel 7 + INMP441 ports ([details](docs/boards.md)) |
 | Firmware | Arduino framework via PlatformIO / pioarduino |
 | Display library | LovyanGFX; M5GFX/M5Unified on M5Stack ports |
 | Host | Optional for standalone cloud; Linux/macOS for host-assisted operation |
@@ -67,7 +76,8 @@ In host-assisted mode the device captures audio and displays responses; the host
 | Audio format | 16 kHz, mono, signed 16-bit PCM WAV |
 
 BOX-3, LiChuang S3 and CoreS3 use **16 MB flash layouts**. AtomS3R uses an
-**8 MB layout with one application slot** to fit bundled fonts. Flashing a new
+**8 MB layout with one application slot** to fit bundled fonts. Basic CrowPanel
+7″ uses a **4 MB layout with one application slot and no filesystem**. Flashing a new
 partition table may make existing filesystem contents incompatible.
 
 ## Repository layout
@@ -107,7 +117,7 @@ pio run --target upload
 ```
 
 These commands default to BOX-3. For other boards, specify `-e lichuang_s3`,
-`-e cores3` or `-e atoms3r_echo` for both build and upload. See the
+`-e cores3`, `-e atoms3r_echo` or `-e crowpanel7_inmp441` for both build and upload. See the
 [board guide](docs/boards.md) before flashing; images are specific to each board.
 
 To inspect boot and hardware diagnostics:
@@ -265,6 +275,14 @@ The extension exposes:
 
 Within Pi, `/box-listen en` or `/box-listen zh` records an utterance and submits the transcript. The standalone voice agent and Pi USB extension **must not access the same serial port simultaneously**.
 
+## OpenClaw voice agent
+
+Select `openclaw` in **Settings → Setup** and enter your Gateway URL, token and
+agent ID. The ESP32 connects directly; speech recognition and synthesis still
+use an OpenAI API key. For local Whisper/Piper speech, use the optional host
+script with `--provider openclaw`. See the [OpenClaw guide](docs/openclaw.md) for
+Gateway configuration, required fields and commands.
+
 ## Standalone OpenAI / Gemini voice — no Python host
 
 The BOX-3 can connect directly to OpenAI or Gemini using its own Wi-Fi and verified
@@ -312,8 +330,9 @@ amplitude gate is uploaded even while waiting for the wake word. Transcription,
 chat, and speech use your provider account and quota. Questions and conversation
 context also go to that provider. Listening pauses during HTTP requests and
 playback. Recordings are limited to ten seconds; replies are requested to be
-short. Speech is downloaded into a bounded PSRAM buffer before playback, so
-this is a sequential voice interface rather than a realtime streaming call.
+short. Model text streams into a sentence speech queue. OpenAI speech and
+Gemini TTS 3.1+ play while downloading; older Gemini speech buffers each sentence.
+The microphone is paused during replies. See [voice latency and timing logs](docs/voice-latency.md).
 The Settings portal is paused during blocking cloud requests and playback.
 
 TLS uses the ESP32 framework CA bundle and network time; certificate verification
@@ -585,7 +604,7 @@ The host and firmware use the same line-oriented `BOX1` requests and acknowledge
 | Checked transfers | Chunk offsets and CRC32 integrity checks |
 | Streaming | PSRAM ring buffer on supported firmware |
 | Wi-Fi playback | Up to 8192 PCM bytes per checked packet; 500 ms audio prefill |
-| Wi-Fi recording downloads | Up to 4096 PCM bytes per read |
+| Wi-Fi recording transfer | Checked 4096-byte reads by default; experimental `--stream-capture` is opt-in due to reported wake timeouts |
 | USB playback | Existing packet sizes and two-second prefill |
 | Transport selection | Touchscreen Switch or `/transport usb`, `/transport wifi` |
 | Playback diagnostics | `underruns` and `stalled_ms` report queued-audio starvation |

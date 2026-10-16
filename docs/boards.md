@@ -9,12 +9,14 @@ Xiaozhi firmware and its server account are not required.
 | Espressif ESP32-S3-BOX-3 | `esp32s3box3` (default) | 320×240, GT911 touch; Settings / Switch | 16 MB flash, PSRAM |
 | LiChuang 实战派 SZPI ESP32-S3 | `lichuang_s3` | ST7789 320×240, FT5x06 touch; hold BOOT 1.5 s for Settings | 16 MB flash, 8 MB octal PSRAM |
 | M5Stack CoreS3 | `cores3` | 320×240, touch; Settings / Switch | 16 MB flash, 8 MB octal PSRAM |
+| CrowPanel basic DIS08070H **with external INMP441** | `crowpanel7_inmp441` | 800×480 RGB, GT911 touch; Settings / Switch | 4 MB flash, 8 MB octal PSRAM; single app, no filesystem ([wiring](crowpanel7.md)) |
 | M5Stack AtomS3R **with Atomic Echo Base** | `atoms3r_echo` | 128×128; hold front button 1.5 s for Settings; short click switches USB/Wi-Fi when both are available | 8 MB flash, 8 MB octal PSRAM; single application slot |
 
 New ports require hardware validation. A successful build does not establish
 microphone gain, speaker quality, touch alignment or board-revision compatibility.
-All four environments have passed compilation. The 95 host regression tests,
-cloud utility and SSE tests, and M5 audio buffer checks also pass. No new board
+All five environments have passed compilation. The 98 host regression tests,
+cloud utility and SSE tests, M5 audio buffer checks and 32-bit I2S conversion/gain
+checks also pass. No new board
 has been flashed or physically tested during this port.
 The original AtomS3, AtomS3 Lite, Atomic SPK Base, Atom Echo, Core2 and generic
 ESP32-S3 boards are different hardware and must not use these images.
@@ -29,10 +31,11 @@ pio run -e lichuang_s3 --target upload --upload-port /dev/ttyACM0
 pio device monitor -e lichuang_s3 --port /dev/ttyACM0 --baud 115200
 ```
 
-Substitute `cores3`, `atoms3r_echo` or `esp32s3box3` as appropriate. For all ports:
+Substitute `cores3`, `atoms3r_echo`, `crowpanel7_inmp441` or `esp32s3box3` as appropriate.
+Read the [CrowPanel wiring and partition guide](crowpanel7.md) before using that target. For all ports:
 
 ```bash
-pio run -e esp32s3box3 -e lichuang_s3 -e cores3 -e atoms3r_echo
+pio run -e esp32s3box3 -e lichuang_s3 -e cores3 -e atoms3r_echo -e crowpanel7_inmp441
 ```
 
 Each image is in `.pio/build/<environment>/firmware.bin`. This application-only
@@ -49,10 +52,13 @@ application slot. Existing filesystem contents may not match the new layout.
 ## Controls and configuration
 
 Wi-Fi failure opens a setup AP after 15 seconds. Its name starts with `BOX3`,
-`LiChuangS3`, `CoreS3`, or `AtomS3R`, followed by `-Setup-XXXX`. The password is
+`LiChuangS3`, `CoreS3`, `AtomS3R`, or `CrowPanel7`, followed by `-Setup-XXXX`. The password is
 `box3setup` for every board; the portal is at `192.168.4.1`.
 
 Touchscreen boards use the existing bottom Settings and Switch buttons.
+The bottom status bar is composed in an off-screen sprite and copied only when
+its text/buttons change, avoiding the periodic clear-and-redraw flash on BOX-3's
+SPI display. Under memory pressure it falls back to direct drawing on changes.
 AtomS3R has no touchscreen: hold its front button for 1.5 seconds to open/close
 Settings; use a phone/computer to enter Wi-Fi and provider settings. A short
 click requests a transport switch only in host mode when USB and Wi-Fi are

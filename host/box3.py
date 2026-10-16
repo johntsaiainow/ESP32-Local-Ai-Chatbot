@@ -67,6 +67,7 @@ class Box3:
         self.serial.port = port
         self.serial.open()
         self.timeout = timeout
+        self.stream_capture = False
         self.pending = bytearray()
         self.synchronized = True
         # File locking via exclusive=True prevents competing clients on POSIX.
@@ -218,19 +219,27 @@ class Box3:
         recording_status = status
         return self._pull_recording(captured, expected, recording_status)
 
-    def capture_speech(self, threshold=80, silence=1.0):
+    def capture_speech(self, threshold=80, silence=0.6):
         if self.reply_fields(self.status).get('vad') != '1':
             raise RuntimeError('Automatic endpointing requires vad=1 firmware. Upload the current firmware first.')
         if not 1 <= threshold <= 32768 or not 0.25 <= silence <= 5:
             raise ValueError('Invalid speech threshold or silence duration')
-        _, status = self.command(f'LISTEN {int(threshold)} {int(silence * 1000)} 2000')
+        push = (getattr(self, 'stream_capture', False) and self.serial.port.startswith('socket://') and
+                self.reply_fields(self.status).get('listenstream') == '1')
+        command = 'LISTENSTREAM' if push else 'LISTEN'
+        pcm, status = self.command(f'{command} {int(threshold)} {int(silence * 1000)} 2000',
+                                   **({'max_data': MAX_BYTES} if push else {}))
         fields = self.reply_fields(status)
         try:
             captured = int(fields.get('bytes', '-1'))
         except ValueError:
             captured = -1
-        if fields.get('audio') != 'pull1' or not 0 <= captured <= MAX_BYTES or captured % 2:
+        if fields.get('audio') != ('push1' if push else 'pull1') or not 0 <= captured <= MAX_BYTES or captured % 2:
             raise RuntimeError(f'Invalid LISTEN acknowledgement: {status}')
+        if push:
+            if len(pcm) != captured or (captured and fields.get('crc') != f'{zlib.crc32(pcm):08x}'):
+                raise RuntimeError('Streaming capture length/CRC mismatch')
+            return pcm
         if captured == 0:
             return b''
         if fields.get('reason') == 'limit':
@@ -398,9 +407,10 @@ class Box3:
 
 class Box3Connection:
     """Keep one controller open and switch it at completed command boundaries."""
-    def __init__(self, endpoints, preferred, factory=Box3):
+    def __init__(self, endpoints, preferred, factory=Box3, stream_capture=False):
         self.endpoints = dict(endpoints)
         self.factory = factory
+        self.stream_capture = stream_capture
         self.active = preferred
         self.device = None
         self._open(preferred)
@@ -410,6 +420,7 @@ class Box3Connection:
 
     def _open(self, transport):
         device = self.factory(self.endpoints[transport])
+        device.stream_capture = self.stream_capture
         try:
             supports_link = Box3.reply_fields(device.status).get('link') == '1'
             if len(self.endpoints) > 1 and not supports_link:
@@ -423,6 +434,13 @@ class Box3Connection:
         self.device = device
         self.active = transport
         print(f'Transport: {transport.upper()} ({self.endpoints[transport]})', flush=True)
+
+    def reconnect(self):
+        """Restore the same transport without replaying audio or agent requests."""
+        if self.device is not None:
+            self.device.close()
+        time.sleep(1.1)  # Allow firmware to release the old TCP controller.
+        self._open(self.active)
 
     def switch(self, transport):
         transport = transport.lower()

@@ -52,7 +52,7 @@ class OfflineVoiceTests(unittest.TestCase):
         recognizer.transcribe.return_value = '\u4F60\u597D'
         with patch('sys.stdout', io.StringIO()):
             self.assertEqual(voice.listen_once(box, recognizer, automatic=True), '\u4F60\u597D')
-        box.capture_speech.assert_called_once_with(80, 1.0)
+        box.capture_speech.assert_called_once_with(80, 0.6)
         box.capture.assert_not_called()
 
     def test_automatic_idle_does_not_run_recognition(self):

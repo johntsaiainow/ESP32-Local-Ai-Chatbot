@@ -14,8 +14,13 @@
 #include "emoji_assets.h"
 #include "serial_write.h"
 #include "speech_gate.h"
+#include "wifi_recovery.h"
 #include <esp_rom_crc.h>
 #include <driver/i2s_std.h>
+#include <esp_system.h>
+
+// HTTP/TLS, JSON and display code share loopTask; keep stack headroom.
+SET_LOOP_TASK_STACK_SIZE(16 * 1024)
 
 #include "boards/display.h"
 
@@ -26,41 +31,59 @@ constexpr char SETUP_PASSWORD[] = "box3setup";
 constexpr uint32_t WIFI_CONNECT_MS = 15000;
 uint32_t wifiStarted = 0;
 bool wifiStartupPending = true;
+osiris_wifi::Recovery wifiRecovery;
 bool agentUsesWiFi = false;
+bool hostControllerConnected = false;
 bool requestedWiFi = false;
 bool hostHasUSB = false, hostHasWiFi = false;
 
 
 void drawSettingsBar() {
-  const lgfx::IFont *previousFont = lcd.getFont();
-  lcd.setFont(&fonts::Font0);
-  lcd.fillRect(0, 212, 320, 28, TFT_BLACK);
-  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-  lcd.setCursor(4, 214);
   const bool setting = wifiManager.getConfigPortalActive();
-  if (setting) {
-    lcd.print(setupSSID);
-    lcd.setCursor(4, 226);
-    lcd.print("192.168.4.1  PW: box3setup");
-  } else {
-    lcd.printf("Via: %s%s", directCloudEnabled() ? cloudMode.c_str() : agentUsesWiFi ? "WiFi" : "USB",
-               !directCloudEnabled() && requestedWiFi != agentUsesWiFi ? " (switch pending)" : "");
-    lcd.setCursor(4, 226);
-    lcd.print(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() :
-              wifiStartupPending ? "WiFi connecting..." : "WiFi offline");
-    if (!directCloudEnabled() && hostHasUSB && hostHasWiFi && WiFi.status() == WL_CONNECTED) {
-      lcd.fillRoundRect(194, 213, 60, 26, 4, TFT_BLUE);
-      lcd.setTextColor(TFT_WHITE, TFT_BLUE);
-      lcd.setCursor(199, 222);
-      lcd.print("Switch");
-    }
+  const bool connected = WiFi.status() == WL_CONNECTED;
+  const bool canSwitch = !setting && !directCloudEnabled() && hostHasUSB && hostHasWiFi && connected;
+  const String firstLine = setting ? setupSSID :
+      String("Via: ") + (directCloudEnabled() ? cloudMode : String(agentUsesWiFi ? "WiFi" : hostControllerConnected ? "USB" : "Offline")) +
+      (!directCloudEnabled() && hostControllerConnected && requestedWiFi != agentUsesWiFi ? " (switch pending)" : "");
+  const String secondLine = setting ? String("192.168.4.1  PW: box3setup") :
+      connected ? WiFi.localIP().toString() : String(wifiStartupPending ? "WiFi connecting..." : wifiRecovery.recovering() ? "WiFi reconnecting..." : "WiFi offline");
+  static String previousFirst, previousSecond;
+  static bool previousSetting = false, previousSwitch = false, drawn = false;
+  if (drawn && firstLine == previousFirst && secondLine == previousSecond &&
+      setting == previousSetting && canSwitch == previousSwitch) return;
+
+  // Compose off-screen so SPI panels never show the intermediate black clear.
+  // The same sprite can be copied into the larger M5/CrowPanel canvas.
+  static lgfx::LGFX_Sprite bar;
+  static bool initialized = false, buffered = false;
+  if (!initialized) {
+    initialized = true; bar.setPsram(true); bar.setColorDepth(16);
+    buffered = bar.createSprite(320, 28) != nullptr;
   }
-  lcd.fillRoundRect(258, 213, 61, 26, 4, TFT_DARKGREY);
-  lcd.setTextColor(TFT_WHITE, TFT_DARKGREY);
-  lcd.setCursor(264, 222);
-  lcd.print(setting ? "Exit" : "Settings");
-  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-  lcd.setFont(previousFont);
+  lgfx::LGFXBase &target = buffered ? static_cast<lgfx::LGFXBase &>(bar) :
+                                     static_cast<lgfx::LGFXBase &>(lcd);
+  const int top = buffered ? 0 : 212;
+  const lgfx::IFont *previousFont = target.getFont();
+  target.setFont(&fonts::Font0);
+  target.fillRect(0, top, 320, 28, TFT_BLACK);
+  target.setTextColor(TFT_WHITE, TFT_BLACK);
+  // Keep long AP/status strings out of the Settings and Switch buttons.
+  target.setClipRect(0, top, canSwitch ? 194 : 258, 28);
+  target.setCursor(4, top + 2); target.print(firstLine);
+  target.setCursor(4, top + 14); target.print(secondLine);
+  target.clearClipRect();
+  if (canSwitch) {
+    target.fillRoundRect(194, top + 1, 60, 26, 4, TFT_BLUE);
+    target.setTextColor(TFT_WHITE, TFT_BLUE);
+    target.setCursor(199, top + 10); target.print("Switch");
+  }
+  target.fillRoundRect(258, top + 1, 61, 26, 4, TFT_DARKGREY);
+  target.setTextColor(TFT_WHITE, TFT_DARKGREY);
+  target.setCursor(264, top + 10); target.print(setting ? "Exit" : "Settings");
+  target.setTextColor(TFT_WHITE, TFT_BLACK); target.setFont(previousFont);
+  if (buffered) bar.pushSprite(&lcd, 0, 212);
+  previousFirst = firstLine; previousSecond = secondLine;
+  previousSetting = setting; previousSwitch = canSwitch; drawn = true;
 }
 
 void enterSettingMode() {
@@ -80,6 +103,13 @@ void setupWiFi() {
   setupCloudSettings();
   std::vector<const char *> menu = {"wifi", "param", "info", "exit"};
   wifiManager.setMenu(menu);
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
+      Serial.printf("WIFI disconnected reason=%u (%s)\n", (unsigned)info.wifi_sta_disconnected.reason,
+        WiFi.STA.disconnectReasonName(static_cast<wifi_err_reason_t>(info.wifi_sta_disconnected.reason)));
+    else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP)
+      Serial.println("WIFI connected (IP ready)");
+  });
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.setSleep(false); // Avoid power-save wakeup latency for interactive audio.
@@ -107,6 +137,14 @@ void pollSettings() {
   if (wifiStartupPending) {
     if (WiFi.status() == WL_CONNECTED) wifiStartupPending = false;
     else if (millis() - wifiStarted >= WIFI_CONNECT_MS) enterSettingMode();
+  }
+  if (wifiRecovery.poll(millis(), WiFi.status() == WL_CONNECTED,
+                        wifiStartupPending || wifiManager.getConfigPortalActive())) {
+    // Use saved station configuration; never erase credentials or restart the radio.
+    WiFi.setAutoReconnect(true);
+    const bool started = WiFi.reconnect();
+    Serial.printf("WIFI recovery connect_requested=%d status=%d\n", started, (int)WiFi.status());
+    drawSettingsBar();
   }
   static bool touchHeld = false;
   static uint32_t lastPress = 0;
@@ -422,7 +460,7 @@ bool parseCount(const String &value, size_t &count) {
   return count > 0 && count % 2 == 0;
 }
 
-void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs) {
+void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs, bool push = false) {
   cancelPlayback();
   releaseRecording();
   uint8_t *audio = static_cast<uint8_t *>(ps_malloc(MAX_AUDIO_BYTES));
@@ -430,7 +468,7 @@ void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs) {
   // Keep 256 ms before onset so the first syllable is preserved.
   int16_t *preroll = static_cast<int16_t *>(ps_malloc(4096 * sizeof(int16_t)));
   if (!preroll) { free(audio); protocolIO->println("BOX1 ERR memory"); return; }
-  size_t ringAt = 0, ringCount = 0, captured = 0;
+  size_t ringAt = 0, ringCount = 0, captured = 0, sentAudio = 0;
   SpeechGate gate(threshold, silenceMs * 16);
   const uint32_t startedAt = millis();
   uint32_t speechAt = 0;
@@ -468,6 +506,10 @@ void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs) {
       }
       protocolIO->println("BOX1 EVENT speech_start");
     }
+    if (push && captured-sentAudio >= 2048) {
+      if (!sendHex(audio+sentAudio, captured-sentAudio)) { error = ESP_FAIL; break; }
+      sentAudio = captured;
+    }
     updateVolumeMeter(stereo, received / 2, 2, gate.started);
     if (gate.finished) break;
     delay(1);
@@ -475,10 +517,17 @@ void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs) {
   free(preroll);
   if (!gate.started && (error == ESP_OK || error == ESP_ERR_TIMEOUT)) {
     free(audio);
-    protocolIO->println("BOX1 OK bytes=0 audio=pull1 reason=silence");
-  } else if (!gate.started || (!gate.finished && captured < MAX_AUDIO_BYTES)) {
+    protocolIO->printf("BOX1 OK bytes=0 audio=%s reason=silence\n", push ? "push1" : "pull1");
+  } else if ((error != ESP_OK && error != ESP_ERR_TIMEOUT) || !gate.started || (!gate.finished && captured < MAX_AUDIO_BYTES)) {
     free(audio);
     protocolIO->printf("BOX1 ERR listen_read error=%d\n", static_cast<int>(error));
+  } else if (push) {
+    if (!sendHex(audio+sentAudio, captured-sentAudio)) {
+      free(audio); protocolIO->println("BOX1 ERR listen_send"); return;
+    }
+    protocolIO->printf("BOX1 OK bytes=%u audio=push1 crc=%08lx reason=%s\n",
+      (unsigned)captured, (unsigned long)esp_rom_crc32_le(0, audio, captured), gate.finished ? "silence" : "limit");
+    free(audio);
   } else {
     recordBuffer = audio;
     recordSize = captured;
@@ -489,8 +538,9 @@ void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs) {
 }
 
 void handleCommand(const String &line) {
+  hostControllerConnected = true;
   if (line == "BOX1 PING") {
-    protocolIO->printf("BOX1 OK mic=%d speaker=%d rate=16000 audio=pull1 capture=slot32-v3 playback=usbfast-v2 rx=4096 vad=1 upload=checked1 stream=ring1 streamrev=4 sync=1 face=1 emojistates=1 link=1 wake=1 netchunk=%u netread=%u\n", audioReady, speakerReady,
+    protocolIO->printf("BOX1 OK mic=%d speaker=%d rate=16000 audio=pull1 capture=slot32-v3 playback=usbfast-v2 rx=4096 vad=1 listenstream=1 upload=checked1 stream=ring1 streamrev=4 sync=1 face=1 emojistates=1 link=1 wake=1 netchunk=%u netread=%u\n", audioReady, speakerReady,
                        agentUsesWiFi ? 8192u : 0u, agentUsesWiFi ? 4096u : 0u);
   } else if (line == "BOX1 WAKE") {
     protocolIO->print("BOX1 OK wake_hex=");
@@ -514,15 +564,17 @@ void handleCommand(const String &line) {
                        agentUsesWiFi ? "wifi" : "usb", requestedWiFi ? "wifi" : "usb",
                        hostHasUSB, hostHasWiFi);
     drawSettingsBar();
-  } else if (line.startsWith("BOX1 LISTEN ")) {
+  } else if (line.startsWith("BOX1 LISTEN ") || line.startsWith("BOX1 LISTENSTREAM ")) {
+    const bool push = line.startsWith("BOX1 LISTENSTREAM ");
     int threshold; unsigned silenceMs, waitMs; char extra;
-    if (!audioReady || sscanf(line.c_str(), "BOX1 LISTEN %d %u %u %c",
+    if (!audioReady || sscanf(line.c_str(), push ? "BOX1 LISTENSTREAM %d %u %u %c" : "BOX1 LISTEN %d %u %u %c",
                               &threshold, &silenceMs, &waitMs, &extra) != 3 ||
         threshold < 1 || threshold > 32768 || silenceMs < 250 || silenceMs > 5000 ||
         waitMs < 250 || waitMs > 10000) {
       protocolIO->println("BOX1 ERR listen_parameters"); return;
     }
-    listenForSpeech(threshold, silenceMs, waitMs);
+    if (push && !agentUsesWiFi) { protocolIO->println("BOX1 ERR listenstream_wifi_only"); return; }
+    listenForSpeech(threshold, silenceMs, waitMs, push);
   } else if (line.startsWith("BOX1 FACE ")) {
     const String expression = line.substring(10);
     if (!agentEmojiCode(expression)) {
@@ -793,6 +845,9 @@ void pollAgent() {
     overflow = false;
     tcpOwned = false;
     agentUsesWiFi = false;
+    hostControllerConnected = false;
+    Serial.println("HOST WiFi controller disconnected; station may still be connected.");
+    drawSettingsBar();
     protocolIO = &Serial;
     // Discard USB commands queued while the network controller owned audio.
     while (Serial.available()) Serial.read();
@@ -810,6 +865,7 @@ void pollAgent() {
       protocolIO = &agentClient;
       tcpOwned = true;
       agentUsesWiFi = true;
+      hostControllerConnected = true;
       requestedWiFi = true;
       line.reserve(16600);
       line = "";
@@ -873,6 +929,8 @@ void setup() {
   // command is over 1000 bytes; reserve room for the longest accepted line.
   Serial.setRxBufferSize(4096);
   Serial.begin(115200);
+  Serial.printf("BOOT reset_reason=%d loop_stack=%u\n", (int)esp_reset_reason(),
+    (unsigned)getArduinoLoopTaskStackSize());
   if (!psramFound()) {
     Serial.println("Osiris requires PSRAM. Check the selected board and memory configuration.");
     while (true) delay(1000);

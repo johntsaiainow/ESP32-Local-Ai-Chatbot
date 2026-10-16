@@ -7,10 +7,10 @@ String subscriptionValidatedModel;
 bool subscriptionHTTP(const String &url, const String &body, bool tokenEndpoint,
                       CloudBuffer &response, int &status) {
   if (time(nullptr) < 1700000000) { cloudError = "Waiting for network time (OAuth TLS)."; return false; }
-  WiFiClientSecure tls;
+  static WiFiClientSecure tls;
   tls.setCACertBundle(cloudCABundleStart, cloudCABundleEnd - cloudCABundleStart);
-  HTTPClient http;
-  http.setConnectTimeout(15000); http.setTimeout(60000); http.setReuse(false);
+  static HTTPClient http;
+  http.setConnectTimeout(15000); http.setTimeout(60000); http.setReuse(true);
   if (!http.begin(tls, url)) { cloudError = "OAuth HTTPS initialization failed."; return false; }
   if (tokenEndpoint) http.addHeader("Content-Type", "application/x-www-form-urlencoded");
   else http.addHeader("Authorization", "Bearer " + subscriptionAccess);
@@ -20,6 +20,7 @@ bool subscriptionHTTP(const String &url, const String &body, bool tokenEndpoint,
     const int expected = http.getSize(); const int received = http.writeToStream(&response);
     ok = received > 0 && (expected < 0 || received == expected);
   }
+  if (!ok) http.setReuse(false);
   http.end();
   if (!ok) cloudError = "ChatGPT OAuth HTTP " + String(status) + ". Import fresh app credentials if expired/revoked.";
   return ok;
@@ -97,7 +98,8 @@ class SubscriptionStream : public Stream {
   bool complete = false, failed = false;
   size_t total = 0;
   subscription::SSEDecoder decoder;
-  SubscriptionStream() : decoder(event, this) {}
+  CloudDelta delta = nullptr; void *context = nullptr;
+  SubscriptionStream(CloudDelta callback = nullptr, void *user = nullptr) : decoder(event, this), delta(callback), context(user) {}
   int available() override { return 0; }
   int read() override { return -1; }
   int peek() override { return -1; }
@@ -118,8 +120,9 @@ class SubscriptionStream : public Stream {
     if (type == "response.output_text.delta") {
       if (!json["delta"].is<const char *>()) return false;
       const String delta = json["delta"].as<String>();
-      if (stream.reply.length() + delta.length() > 2048) return false;
+      if (stream.complete || stream.reply.length() + delta.length() > 2048) return false;
       stream.reply += delta;
+      if (stream.delta && !stream.delta(delta, stream.context)) return false;
     } else if (type == "response.completed") {
       stream.complete = String(json["response"]["status"] | "") == "completed";
       if (!stream.complete) return false;
@@ -127,7 +130,7 @@ class SubscriptionStream : public Stream {
     return true;
   }
 };
-String subscriptionReply(JsonDocument &request) {
+String subscriptionReply(JsonDocument &request, CloudDelta delta = nullptr, void *context = nullptr) {
   if (!refreshSubscription() || !validateSubscriptionModel()) return "";
   request["model"] = cloudChatModel; request["stream"] = true; request["store"] = false;
   String body;
@@ -135,10 +138,10 @@ String subscriptionReply(JsonDocument &request) {
     cloudError = "No memory for subscription request."; return "";
   }
   for (unsigned attempt = 0; attempt < 2; ++attempt) {
-    WiFiClientSecure tls;
+    static WiFiClientSecure tls;
     tls.setCACertBundle(cloudCABundleStart, cloudCABundleEnd - cloudCABundleStart);
-    HTTPClient http;
-    http.setConnectTimeout(15000); http.setTimeout(60000); http.setReuse(false);
+    static HTTPClient http;
+    http.setConnectTimeout(15000); http.setTimeout(60000); http.setReuse(true);
     if (!http.begin(tls, "https://api.openai.com/v1/responses")) {
       cloudError = "Cannot connect to ChatGPT Responses."; return "";
     }
@@ -153,9 +156,12 @@ String subscriptionReply(JsonDocument &request) {
       http.end(); cloudError = "ChatGPT subscription HTTP " + String(status) +
         ". Check plan grants/quota/model. No API fallback was made."; return "";
     }
-    SubscriptionStream stream;
-    const int received = http.writeToStream(&stream); http.end();
-    if (received <= 0 || stream.failed || !stream.complete || stream.reply.isEmpty()) {
+    SubscriptionStream stream(delta, context);
+    const int received = http.writeToStream(&stream);
+    const bool ok = received > 0 && !stream.failed && stream.complete && !stream.reply.isEmpty();
+    if (!ok) http.setReuse(false);
+    http.end();
+    if (!ok) {
       cloudError = "Subscription stream failed, blocked, oversized or incomplete."; return "";
     }
     return stream.reply;

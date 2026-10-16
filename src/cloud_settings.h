@@ -2,6 +2,12 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include "wake_phrase.h"
+#include "openclaw_utils.h"
+
+String openClawURL, openClawToken, openClawAgent = "default";
+WiFiManagerParameter openClawURLParam("oc_url", "OpenClaw Gateway URL (e.g. http://192.168.1.10:18789)", "", 256);
+WiFiManagerParameter openClawTokenParam("oc_token", "OpenClaw token (blank keeps saved; - clears)", "", 256, "type=\"password\" autocomplete=\"new-password\"");
+WiFiManagerParameter openClawAgentParam("oc_agent", "OpenClaw agent ID (default: default)", "default", 64);
 
 String cloudMode = "host", cloudOpenAIKey, cloudGeminiKey;
 String cloudChatModel, cloudSTTModel = "gpt-4o-mini-transcribe", cloudTTSModel, cloudVoice;
@@ -21,7 +27,7 @@ WiFiManagerParameter subscriptionNotice(
 WiFiManagerParameter subscriptionParam("chatgpt_oauth", "OAuth JSON (blank keeps saved; - signs out)", "", 8192,
                                       "type=\"password\" autocomplete=\"new-password\"");
 
-WiFiManagerParameter cloudModeParam("cloud_mode", "Mode: host / openai / gemini / chatgpt", "host", 8);
+WiFiManagerParameter cloudModeParam("cloud_mode", "Mode: host / openai / gemini / chatgpt / openclaw", "host", 8);
 WiFiManagerParameter openAIKeyParam("openai_key", "OpenAI API key (blank keeps saved; - clears)", "", 256,
                                    "type=\"password\" autocomplete=\"new-password\"");
 WiFiManagerParameter geminiKeyParam("gemini_key", "Gemini API key (blank keeps saved; - clears)", "", 256,
@@ -31,7 +37,7 @@ WiFiManagerParameter sttModelParam("stt_model", "OpenAI transcription model", "g
 WiFiManagerParameter ttsModelParam("tts_model", "Speech model ID (must support TTS)", "", 96);
 WiFiManagerParameter voiceParam("cloud_voice", "Voice (blank: OpenAI alloy / Gemini Kore)", "", 64);
 
-bool directCloudEnabled() { return cloudMode == "openai" || cloudMode == "gemini" || cloudMode == "chatgpt"; }
+bool directCloudEnabled() { return cloudMode == "openai" || cloudMode == "gemini" || cloudMode == "chatgpt" || cloudMode == "openclaw"; }
 bool saveSubscriptionJSON(const String &value, bool persist) {
   JsonDocument json;
   if (value.length() > 8192 || deserializeJson(json, value)) {
@@ -86,6 +92,9 @@ void clearSubscriptionCredentials() {
 void loadCloudSettings() {
   Preferences prefs;
   if (prefs.begin("cloud-voice", true)) {
+    openClawURL = prefs.getString("oc_url", "");
+    openClawToken = prefs.getString("oc_token", "");
+    openClawAgent = prefs.getString("oc_agent", "default");
     cloudMode = prefs.getString("mode", "host");
     cloudOpenAIKey = prefs.getString("openai_key", "");
     cloudGeminiKey = prefs.getString("gemini_key", "");
@@ -98,6 +107,8 @@ void loadCloudSettings() {
     wakePhrase = osiris_wake::normalize(saved.c_str(), phrase) ? phrase.c_str() : "Osiris";
     prefs.end();
   }
+  openClawURLParam.setValue(openClawURL.c_str(), 256);
+  openClawAgentParam.setValue(openClawAgent.c_str(), 64);
   cloudModeParam.setValue(cloudMode.c_str(), 8);
   chatModelParam.setValue(cloudChatModel.c_str(), 96);
   sttModelParam.setValue(cloudSTTModel.c_str(), 96);
@@ -113,8 +124,21 @@ void saveCloudSettings() {
     return;
   }
   String mode = cloudModeParam.getValue(); mode.trim(); mode.toLowerCase();
-  if (mode != "host" && mode != "openai" && mode != "gemini" && mode != "chatgpt") {
-    Serial.println("Cloud mode must be host, openai, gemini, or chatgpt; settings not saved."); return;
+  if (mode != "host" && mode != "openai" && mode != "gemini" && mode != "chatgpt" && mode != "openclaw") {
+    Serial.println("Cloud mode must be host, openai, gemini, chatgpt, or openclaw; settings not saved."); return;
+  }
+  String gateway = openClawURLParam.getValue(); gateway.trim();
+  String agent = openClawAgentParam.getValue(); agent.trim();
+  if (agent.isEmpty()) agent = "default";
+  std::string endpoint;
+  if ((!gateway.isEmpty() && !osiris_openclaw::endpoint(gateway.c_str(), endpoint)) ||
+      !osiris_openclaw::agentValid(agent.c_str())) {
+    wakeSettingError = "Invalid OpenClaw URL or agent ID."; return;
+  }
+  String token = openClawTokenParam.getValue(); token.trim();
+  openClawTokenParam.setValue("", 256);
+  if (token.length() && !osiris_openclaw::tokenValid(token.c_str())) {
+    wakeSettingError = "Invalid OpenClaw token."; return;
   }
   String credentials = subscriptionParam.getValue(); credentials.trim();
   subscriptionParam.setValue("", 8192);
@@ -128,6 +152,8 @@ void saveCloudSettings() {
     prefs.end(); wakeSettingError = "Could not save wake phrase. Please try again."; return;
   }
   prefs.putString("mode", mode);
+  prefs.putString("oc_url", gateway); prefs.putString("oc_agent", agent);
+  if (token.length()) prefs.putString("oc_token", token == "-" ? "" : token);
   wakeSettingError = "";
   for (auto *param : {&openAIKeyParam, &geminiKeyParam}) {
     String key = param->getValue(); key.trim();
@@ -142,7 +168,7 @@ void saveCloudSettings() {
 }
 void setupCloudSettings() {
   loadCloudSettings(); loadSubscriptionCredentials();
-  for (auto *param : {&cloudModeParam, &openAIKeyParam, &geminiKeyParam, &chatModelParam,
+  for (auto *param : {&cloudModeParam, &openClawURLParam, &openClawTokenParam, &openClawAgentParam, &openAIKeyParam, &geminiKeyParam, &chatModelParam,
                       &sttModelParam, &ttsModelParam, &voiceParam, &wakePhraseParam, &subscriptionNotice, &subscriptionParam}) wifiManager.addParameter(param);
   wifiManager.setSaveParamsCallback(saveCloudSettings);
 }

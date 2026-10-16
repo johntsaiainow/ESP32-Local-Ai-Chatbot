@@ -9,6 +9,8 @@ import sys
 import tempfile
 import unicodedata
 import wave
+import threading
+import time
 from audio_health import require_valid_framing
 
 MODELS = Path(os.environ.get('BOX3_MODELS_DIR', '~/aion-voice/models')).expanduser()
@@ -69,6 +71,7 @@ class Recognizer:
 
 class WhisperRecognizer:
     """Keep one multilingual model loaded for the entire voice session."""
+    beam_size = 1
     def __init__(self, language='auto', model='small'):
         if language not in ('auto', 'en', 'zh', 'zh-TW'):
             raise ValueError('Whisper language must be auto, en, zh, or zh-TW')
@@ -81,6 +84,7 @@ class WhisperRecognizer:
                                '-r host/requirements-offline.txt') from exc
         self.language = language
         self.last_language = None
+        self.beam_size = 1
         cache = Path(__file__).resolve().parents[1] / '.cache/voice-models/whisper'
         print(f'Loading Whisper {model} (CPU int8, language={language})...', file=sys.stderr, flush=True)
         from faster_whisper.utils import download_model
@@ -108,7 +112,7 @@ class WhisperRecognizer:
         audio = np.frombuffer(pcm, dtype='<i2').astype(np.float32) / 32768.0
         language = None if self.language == 'auto' else self.language.split('-')[0]
         segments, info = self.model.transcribe(
-            audio, language=language, task='transcribe', beam_size=5,
+            audio, language=language, task='transcribe', beam_size=self.beam_size,
             temperature=0, condition_on_previous_text=False, vad_filter=True,
             initial_prompt='Mandarin Chinese and English conversation.')
         self.last_language = info.language
@@ -258,3 +262,57 @@ if __name__ == '__main__':
     except Exception as exc:
         print(f'Offline speech: {exc}', file=sys.stderr)
         sys.exit(1)
+
+
+_piper_voices = {}
+_piper_lock = threading.Lock()
+
+
+def _resident_voice(model, language):
+    from piper import PiperVoice
+    key = str(model)
+    if key not in _piper_voices:
+        started = time.monotonic()
+        _piper_voices[key] = PiperVoice.load(key)
+        print(f'LATENCY stage=tts_model_load language={language} elapsed_ms={(time.monotonic()-started)*1000:.0f}', flush=True)
+    return _piper_voices[key]
+
+
+def warmup_resident(languages):
+    """Move configured voice loading to startup without generating or playing audio."""
+    with _piper_lock:
+        for language in languages:
+            try:
+                model = model_path('PIPER', language)
+            except FileNotFoundError:
+                print(f'TTS warmup: no configured voice for {language}; skipped.', file=sys.stderr)
+                continue
+            _resident_voice(model, language)
+
+
+def synthesize_resident(text, output, language):
+    """Keep Piper voices loaded between sentences/turns; one synthesis worker owns them."""
+    text = clean_text(text)
+    segments = speech_segments(text, language)
+    with _piper_lock, tempfile.TemporaryDirectory(prefix='osiris-piper-') as temp:
+        with wave.open(str(output), 'wb') as destination:
+            destination.setnchannels(1)
+            destination.setsampwidth(2)
+            destination.setframerate(16000)
+            for index, (selected, content) in enumerate(segments):
+                model = model_path('PIPER', selected)
+                voice = _resident_voice(model, selected)
+                source = Path(temp)/f'{index}.wav'
+                with wave.open(str(source), 'wb') as wav:
+                    voice.synthesize_wav(content, wav)
+                with wave.open(str(source), 'rb') as wav:
+                    if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or not 8000 <= wav.getframerate() <= 48000:
+                        raise ValueError('Piper must return mono PCM16 at 8–48 kHz')
+                    pcm = wav.readframes(wav.getnframes())
+                    rate = wav.getframerate()
+                if rate != 16000 and pcm:
+                    import numpy as np
+                    samples = np.frombuffer(pcm, dtype='<i2')
+                    positions = np.arange(len(samples)*16000//rate, dtype=np.float64)*rate/16000
+                    pcm = np.interp(positions, np.arange(len(samples)), samples).clip(-32768, 32767).astype('<i2').tobytes()
+                destination.writeframes(pcm)

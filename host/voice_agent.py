@@ -2,6 +2,7 @@
 import argparse
 from array import array
 from collections import deque
+from contextlib import ExitStack
 import os
 from pathlib import Path
 import queue
@@ -16,7 +17,10 @@ import wave
 
 from box3 import Box3, Box3Connection
 from chat_backends import CloudChat
-from offline_speech import create_recognizer, render_music, synthesize
+from streaming_reply import stream_reply
+from pi_stream import stream_pi
+from pi_rpc import PiRPC
+from offline_speech import create_recognizer, render_music, synthesize, warmup_resident
 
 
 class WakeWordGate:
@@ -99,10 +103,11 @@ def pcm_level(pcm):
     return sum(abs(int(sample)) for sample in samples) / max(1, len(samples))
 
 
-def listen_once(box, recognizer, seconds=4, save_recording=None, automatic=False, threshold=80, silence=1.0,
+def listen_once(box, recognizer, seconds=4, save_recording=None, automatic=False, threshold=80, silence=0.6,
                 announce=True, wake_waiting=False):
     """Recognize one contiguous device recording without an amplitude gate."""
     language = recognizer.language
+    capture_started = time.monotonic()
     if automatic:
         if announce:
             show_status(box, 'listening', f'Listening ({language}) \U0001F3A4\nSpeak naturally.\nPause to send your message.', 'en')
@@ -115,6 +120,7 @@ def listen_once(box, recognizer, seconds=4, save_recording=None, automatic=False
             show_status(box, 'listening', f'Listening ({language}) \U0001F3A4\nSpeak now for {seconds:g} seconds.', 'en')
         print(f'Listening ({language}): speak now for {seconds:g} seconds...', flush=True)
         pcm = box.capture(seconds)
+    print(f'LATENCY stage=capture_receive elapsed_ms={(time.monotonic()-capture_started)*1000:.0f} audio_ms={len(pcm)/32:.0f}', flush=True)
     samples = array('h')
     samples.frombytes(pcm)
     if sys.byteorder != 'little':
@@ -134,7 +140,9 @@ def listen_once(box, recognizer, seconds=4, save_recording=None, automatic=False
         return ''
     if not wake_waiting:
         show_status(box, 'thinking', 'Recognizing speech... \U0001F914', 'en')
+    stt_started = time.monotonic()
     text = recognizer.transcribe(pcm)
+    print(f'LATENCY stage=stt elapsed_ms={(time.monotonic()-stt_started)*1000:.0f}', flush=True)
     if not text:
         print(f'No speech recognized. Selected model: {language}. '
               'Check the recording and selected language.', flush=True)
@@ -201,18 +209,26 @@ def display_pages(text, limit=1024):
         yield page
 
 
-def ask_pi(text, session, timeout=180, no_extensions=False):
-    prompt = ('Reply concisely for spoken playback, in under 50 words. '
+def pi_prompt(text):
+    return ('Reply concisely for spoken playback, in under 50 words. '
               'Use Traditional Chinese when the user speaks Chinese; otherwise use English. '
+              'Lead with a short complete sentence, then add details only if needed. '
+              'For general questions, avoid exploring the workspace; use only the tools needed to answer. '
               'Avoid code blocks unless explicitly requested. Do not claim to search for or play music; '
               'music playback is handled by the host using local files. '
-              'Use available weather or web tools for current weather; never invent live conditions. '
+              'Use available weather or web tools for current weather; fetch fresh data for this request instead of reusing earlier weather numbers. Never invent live conditions. '
               'Do not access BOX-3 over USB or TCP; the voice host owns the device connection. User request:\n' + text)
+
+
+def ask_pi(text, session, timeout=180, no_extensions=False, on_delta=None, cancel=None):
+    prompt = pi_prompt(text)
     argv = ['pi', '--print', '--thinking', 'off',
             '--exclude-tools', 'box3_*,get_room_temperature,jukebox_control']
     if no_extensions:
         argv.append('--no-extensions')
     argv.extend(['--session', str(session), prompt])
+    if on_delta is not None:
+        return stream_pi(argv, on_delta, timeout, cancel)
     result = subprocess.run(argv,
                             input='', capture_output=True, text=True, encoding='utf-8',
                             timeout=timeout, check=True)
@@ -350,9 +366,9 @@ def connection_options(port=None, host=None, tcp_port=8233, preferred=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--provider', choices=('pi', 'openai', 'gemini'), default='pi',
+    parser.add_argument('--provider', choices=('pi', 'openai', 'gemini', 'openclaw'), default='pi',
                         help='Reply backend (default: pi)')
-    parser.add_argument('--model', help='Cloud model ID, or set BOX3_OPENAI_MODEL / BOX3_GEMINI_MODEL')
+    parser.add_argument('--model', help='Model ID (OpenClaw: openclaw/<agentId>); or set BOX3_PROVIDER_MODEL')
     parser.add_argument('--port', help='USB port or socket://HOST:PORT (default: BOX3_PORT)')
     parser.add_argument('--host', help='BOX-3 Wi-Fi IP or hostname (default: BOX3_HOST)')
     parser.add_argument('--transport', choices=('usb', 'wifi'), help='Initial transport when both endpoints are configured')
@@ -363,7 +379,10 @@ def main():
     parser.add_argument('--whisper-model', default=os.environ.get('BOX3_WHISPER_MODEL', 'small'),
                         help='Multilingual faster-whisper model name or local model directory')
     parser.add_argument('--threshold', type=float, default=80)
-    parser.add_argument('--silence', type=float, default=1.0)
+    parser.add_argument('--silence', type=float, default=0.6)
+    parser.add_argument('--stream-capture', action='store_true', help='Experimental Wi-Fi LISTENSTREAM capture (default: stable LISTEN/pull)')
+    parser.add_argument('--no-stream-replies', action='store_true', help='Use complete replies and legacy Piper CLI for comparison')
+    parser.add_argument('--whisper-beam-size', type=int, choices=range(1, 6), default=1, help='Whisper beam width (1 is faster; 5 uses more CPU)')
     parser.add_argument('--keyboard-only', action='store_true')
     parser.add_argument('--wake-word', help='Override the device wake phrase (default: Settings value, or Osiris on older firmware)')
     parser.add_argument('--no-wake-word', action='store_true', help='Send spoken requests without waking first')
@@ -371,6 +390,8 @@ def main():
                         help='Seconds to accept a request after a standalone wake phrase (default: 15)')
     parser.add_argument('--followup-timeout', type=float, default=30,
                         help='Stay awake after each completed reply (seconds, default: 30)')
+    parser.add_argument('--pi-one-shot', action='store_true', help='Use one Pi CLI process per request instead of persistent RPC')
+    parser.add_argument('--no-tts-warmup', action='store_true', help='Load Piper voices on first reply instead of startup')
     parser.add_argument('--pi-no-extensions', action='store_true',
                         help='Disable Pi extension discovery for troubleshooting')
     parser.add_argument('--music-dir', type=Path, default=Path('~/Music').expanduser(),
@@ -408,124 +429,175 @@ def main():
         cloud = None if args.provider == 'pi' else CloudChat(args.provider, args.model)
     except ValueError as exc:
         parser.error(str(exc))
-    agent_name = {'pi': 'Pi', 'openai': 'OpenAI', 'gemini': 'Gemini'}[args.provider]
+    agent_name = {'pi': 'Pi', 'openai': 'OpenAI', 'gemini': 'Gemini', 'openclaw': 'OpenClaw'}[args.provider]
     wake_ui = None
     recognizer = None if args.keyboard_only else create_recognizer(
         args.language, args.stt_backend, args.whisper_model)
+    if recognizer is not None and args.stt_backend == 'whisper':
+        recognizer.beam_size = args.whisper_beam_size
     commands = queue.Queue(maxsize=16)
     threading.Thread(target=keyboard_loop, args=(commands,), daemon=True).start()
     vad = VoiceActivity(args.threshold, args.silence)
-    box = Box3Connection(endpoints, preferred)
+    box = Box3Connection(endpoints, preferred, stream_capture=args.stream_capture)
     listening_announced = False
     wake_next_poll = 0
     try:
-        with tempfile.TemporaryDirectory(prefix='box3-agent-') as temp:
+        with tempfile.TemporaryDirectory(prefix='box3-agent-') as temp, ExitStack() as resources:
             session = Path(temp) / 'pi-session.jsonl'
+            if not args.no_stream_replies and not args.no_tts_warmup and not args.keyboard_only:
+                print('Preparing Piper voices before listening...', flush=True)
+                warmup_resident(('zh-TW', 'en'))
+            persistent_pi = None
+            if cloud is None and not args.no_stream_replies and not args.pi_one_shot:
+                argv = ['pi', '--mode', 'rpc', '--thinking', 'off', '--exclude-tools',
+                        'box3_*,get_room_temperature,jukebox_control', '--session', str(session)]
+                if args.pi_no_extensions:
+                    argv.append('--no-extensions')
+                persistent_pi = PiRPC(argv, prompt_builder=pi_prompt)
+                resources.callback(persistent_pi.close)
+                print('Starting persistent Pi RPC...', flush=True)
+                persistent_pi.start()
             box.display(agent_name + ' voice agent ready \U0001F916 \U0001F3A4', 'en')
             print(f'Reply provider: {agent_name}' + (f' | Model: {cloud.model}' if cloud else ''), flush=True)
             print('Firmware:', box.status, flush=True)
             print('BOX-3 voice agent ready. Listening is paused during Pi requests and playback.')
             while True:
                 try:
-                    box.poll_transport()
-                except (RuntimeError, ValueError) as exc:
-                    print('Transport switch:', exc, file=sys.stderr)
-                if wake_gate is not None and args.wake_word is None and time.monotonic() >= wake_next_poll:
-                    wake_next_poll = time.monotonic() + 2
                     try:
-                        if sync_wake_phrase(box, wake_gate):
-                            wake_ui = None
+                        box.poll_transport()
                     except (RuntimeError, ValueError) as exc:
-                        print('Wake setting:', exc, file=sys.stderr)
-                if wake_gate is not None and wake_ui != wake_gate.waiting:
-                    wake_ui = show_wake_state(box, wake_gate)
-                try:
-                    text = commands.get(timeout=0.1) if args.keyboard_only else commands.get_nowait()
-                    vad.reset()
-                except queue.Empty:
-                    if args.keyboard_only:
-                        continue
-                    if args.capture_mode == 'auto':
-                        text = listen_once(box, recognizer, save_recording=args.save_recording,
-                                           automatic=True, threshold=args.threshold, silence=args.silence,
-                                           announce=wake_gate is None and not listening_announced,
-                                           wake_waiting=wake_gate is not None and wake_gate.waiting)
-                        listening_announced = True
-                    elif args.capture_mode == 'window':
-                        text = listen_once(box, recognizer, args.record_seconds, args.save_recording,
-                                           announce=wake_gate is None,
-                                           wake_waiting=wake_gate is not None and wake_gate.waiting)
-                    else:
-                        # Experimental VAD batches have transfer gaps. Prefer
-                        # window mode when recognition is unreliable.
-                        pcm = box.capture(0.25)
-                        print(f'VAD microphone level: {pcm_level(pcm):.1f}; threshold={args.threshold:g}', flush=True)
-                        utterance = vad.feed(pcm)
-                        if utterance is None:
-                            continue
-                        text = recognizer.transcribe(utterance)
-                        if not text:
-                            print('No speech recognized from VAD utterance. Try --capture-mode window.', flush=True)
-                    if not text:
-                        continue
-                    listening_announced = False
-                    if wake_gate is not None:
-                        text = wake_gate.accept(text)
-                        if text is None:
-                            continue
-                if text == '/quit':
-                    break
-                if text.startswith('/transport'):
-                    target = text.split(maxsplit=1)[1].strip().lower() if ' ' in text else 'status'
-                    try:
-                        if target != 'status':
-                            box.switch(target)
-                        print(f'Transport: {box.active.upper()} | Configured: {", ".join(box.endpoints)}', flush=True)
-                    except (ValueError, RuntimeError) as exc:
                         print('Transport switch:', exc, file=sys.stderr)
-                    continue
-                response_completed = False
-                try:
-                    if text.startswith('/music '):
-                        source = Path(text[7:].strip()).expanduser()
-                        play_local_music(box, source, temp, args.music_backend)
-                    else:
-                        show_user_message(box, text, agent_name)
-                        query = music_query(text)
-                        if query is not None:
-                            matches = find_local_music(args.music_dir.expanduser(), query)
-                            if len(matches) == 1:
-                                play_local_music(box, matches[0], temp, args.music_backend)
-                            elif matches:
-                                names = ', '.join(path.stem for path in matches[:5])
-                                speak_reply(box, '\u627E\u5230\u591A\u500B\u7248\u672C\uFF0C\u8ACB\u8AAA\u51FA\u66F4\u5B8C\u6574\u7684\u6A94\u540D\uFF1A' + names, temp)
-                            else:
-                                speak_reply(box, '\u672C\u6A5F\u97F3\u6A02\u8CC7\u6599\u593E\u627E\u4E0D\u5230\u9019\u9996\u6B4C\u3002\u8ACB\u5148\u653E\u5165\u97F3\u6A02\u6A94\uFF0C\u518D\u8AAA\u6B4C\u540D\u3002', temp)
+                    if wake_gate is not None and args.wake_word is None and time.monotonic() >= wake_next_poll:
+                        wake_next_poll = time.monotonic() + 2
+                        try:
+                            if sync_wake_phrase(box, wake_gate):
+                                wake_ui = None
+                        except (RuntimeError, ValueError) as exc:
+                            print('Wake setting:', exc, file=sys.stderr)
+                    if wake_gate is not None and wake_ui != wake_gate.waiting:
+                        wake_ui = show_wake_state(box, wake_gate)
+                    try:
+                        text = commands.get(timeout=0.1) if args.keyboard_only else commands.get_nowait()
+                        vad.reset()
+                    except queue.Empty:
+                        if args.keyboard_only:
+                            continue
+                        if args.capture_mode == 'auto':
+                            text = listen_once(box, recognizer, save_recording=args.save_recording,
+                                               automatic=True, threshold=args.threshold, silence=args.silence,
+                                               announce=wake_gate is None and not listening_announced,
+                                               wake_waiting=wake_gate is not None and wake_gate.waiting)
+                            listening_announced = True
+                        elif args.capture_mode == 'window':
+                            text = listen_once(box, recognizer, args.record_seconds, args.save_recording,
+                                               announce=wake_gate is None,
+                                               wake_waiting=wake_gate is not None and wake_gate.waiting)
                         else:
-                            reply = cloud.ask(text) if cloud is not None else ask_pi(
-                                text, session, no_extensions=args.pi_no_extensions)
-                            speak_reply(box, reply, temp, agent_name)
-                    response_completed = True
-                except (Exception, KeyboardInterrupt) as exc:
-                    if isinstance(exc, KeyboardInterrupt):
-                        raise
-                    print('Voice agent error:', exc, file=sys.stderr)
-                    box.expression('error')
-                    box.display('Request failed \u274C\nSee host terminal.', 'en')
-                finally:
+                            # Experimental VAD batches have transfer gaps. Prefer
+                            # window mode when recognition is unreliable.
+                            pcm = box.capture(0.25)
+                            print(f'VAD microphone level: {pcm_level(pcm):.1f}; threshold={args.threshold:g}', flush=True)
+                            utterance = vad.feed(pcm)
+                            if utterance is None:
+                                continue
+                            text = recognizer.transcribe(utterance)
+                            if not text:
+                                print('No speech recognized from VAD utterance. Try --capture-mode window.', flush=True)
+                        if not text:
+                            continue
+                        listening_announced = False
+                        if wake_gate is not None:
+                            text = wake_gate.accept(text)
+                            if text is None:
+                                continue
+                    if text == '/quit':
+                        break
+                    if text.startswith('/transport'):
+                        target = text.split(maxsplit=1)[1].strip().lower() if ' ' in text else 'status'
+                        try:
+                            if target != 'status':
+                                box.switch(target)
+                            print(f'Transport: {box.active.upper()} | Configured: {", ".join(box.endpoints)}', flush=True)
+                        except (ValueError, RuntimeError) as exc:
+                            print('Transport switch:', exc, file=sys.stderr)
+                        continue
+                    response_completed = False
+                    try:
+                        if text.startswith('/music '):
+                            source = Path(text[7:].strip()).expanduser()
+                            play_local_music(box, source, temp, args.music_backend)
+                        else:
+                            show_user_message(box, text, agent_name)
+                            query = music_query(text)
+                            if query is not None:
+                                matches = find_local_music(args.music_dir.expanduser(), query)
+                                if len(matches) == 1:
+                                    play_local_music(box, matches[0], temp, args.music_backend)
+                                elif matches:
+                                    names = ', '.join(path.stem for path in matches[:5])
+                                    speak_reply(box, '\u627E\u5230\u591A\u500B\u7248\u672C\uFF0C\u8ACB\u8AAA\u51FA\u66F4\u5B8C\u6574\u7684\u6A94\u540D\uFF1A' + names, temp)
+                                else:
+                                    speak_reply(box, '\u672C\u6A5F\u97F3\u6A02\u8CC7\u6599\u593E\u627E\u4E0D\u5230\u9019\u9996\u6B4C\u3002\u8ACB\u5148\u653E\u5165\u97F3\u6A02\u6A94\uFF0C\u518D\u8AAA\u6B4C\u540D\u3002', temp)
+                            else:
+                                if not args.no_stream_replies and (cloud is None or cloud.streaming is True):
+                                    if persistent_pi is not None:
+                                        backend = persistent_pi
+                                    elif cloud is None:
+                                        class PiBackend:
+                                            def __init__(self):
+                                                self.cancel_event = threading.Event()
+                                            def cancel(self):
+                                                self.cancel_event.set()
+                                            def ask(self, prompt, on_delta):
+                                                return ask_pi(prompt, session, no_extensions=args.pi_no_extensions, on_delta=on_delta, cancel=self.cancel_event)
+                                        backend = PiBackend()
+                                    else:
+                                        backend = cloud
+                                    stream_reply(box, backend, text, temp, agent_name, reply_language, conversation_pages)
+                                else:
+                                    llm_started = time.monotonic()
+                                    reply = cloud.ask(text) if cloud is not None else ask_pi(
+                                        text, session, no_extensions=args.pi_no_extensions)
+                                    print(f'LATENCY stage=llm elapsed_ms={(time.monotonic()-llm_started)*1000:.0f}', flush=True)
+                                    speak_reply(box, reply, temp, agent_name)
+                        response_completed = True
+                    except (Exception, KeyboardInterrupt) as exc:
+                        if isinstance(exc, KeyboardInterrupt):
+                            raise
+                        print('Voice agent error:', exc, file=sys.stderr)
+                        box.expression('error')
+                        box.display('Request failed \u274C\nSee host terminal.', 'en')
+                    finally:
+                        vad.reset()
+                        listening_announced = False
+                        # Discard the first post-playback batch to reduce stale DMA
+                        # audio triggering the next utterance. No echo cancellation.
+                        if recognizer is not None and getattr(box, 'synchronized', True):
+                            box.capture(0.1)
+                        if wake_gate is not None:
+                            if response_completed:
+                                wake_gate.arm_followup()
+                            else:
+                                wake_gate.reset()
+                            wake_ui = None
+                except (OSError, RuntimeError, ValueError) as exc:
+                    # Capture/STT/wake-screen errors previously escaped the loop
+                    # and closed TCP, causing the device to appear to switch to USB.
+                    print(f'Voice input/connection error: {exc}', file=sys.stderr, flush=True)
                     vad.reset()
                     listening_announced = False
-                    # Discard the first post-playback batch to reduce stale DMA
-                    # audio triggering the next utterance. No echo cancellation.
-                    if recognizer is not None and getattr(box, 'synchronized', True):
-                        box.capture(0.1)
+                    wake_ui = None
                     if wake_gate is not None:
-                        if response_completed:
-                            wake_gate.arm_followup()
-                        else:
-                            wake_gate.reset()
-                        wake_ui = None
+                        wake_gate.reset()
+                    try:
+                        box.reconnect()
+                        print('Device reconnected; failed utterance was discarded. Please speak again.', flush=True)
+                    except (OSError, RuntimeError, ValueError) as recovery_error:
+                        print(f'Device reconnect failed: {recovery_error}', file=sys.stderr, flush=True)
+                        time.sleep(1)
     finally:
+        if cloud is not None:
+            cloud.close()
         box.close()
 
 
