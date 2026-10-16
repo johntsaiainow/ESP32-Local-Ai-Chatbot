@@ -459,3 +459,35 @@ The device also reads incoming commands in 512-byte batches and polls Settings
 touch input at 50 Hz. This avoids a socket availability query and an I2C touch
 poll for every received byte/loop, while preserving fragmented commands, USB
 framing, frame limits, and the existing 500 ms Wi-Fi prefill.
+
+
+## Wake phrase: Osiris!
+
+Spoken requests now require **Osiris** by default over USB or Wi-Fi:
+
+- Say **“Osiris, what is the weather?”** in one utterance, or
+- Say **“Osiris!”**, wait for **Awake!** on the display, then speak one request
+  within **15 seconds**.
+
+After one request, the agent returns to waiting for the wake phrase. Unrelated
+speech is ignored while waiting, and a standalone wake expires if no request
+arrives. Keyboard prompts and `/transport` commands do not need a wake phrase.
+The spelling is **Osiris**; matching ignores case and does not require the
+exclamation mark.
+
+```bash
+host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --language auto
+# Optional: change timeout, keyword, or disable wake gating
+host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --wake-timeout 20
+host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --wake-word 'Hey Osiris'
+host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --no-wake-word
+```
+
+Wake detection uses the existing host speech-to-text transcript, rather than a
+separate trained keyword model. Audio still travels to the host and is recognized
+while waiting; requests only go to Pi after the wake phrase matches. Recognition
+accuracy and wake response time depend on the speech model and language setting;
+`--language auto` allows the English wake phrase with Chinese or English requests.
+It listens between requests, and remains paused during Pi processing and speaker
+playback. This change only requires restarting the updated host script; no new
+firmware is needed for wake gating.

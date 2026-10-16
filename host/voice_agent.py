@@ -18,6 +18,55 @@ from box3 import Box3, Box3Connection
 from offline_speech import create_recognizer, render_music, synthesize
 
 
+class WakeWordGate:
+    """Gate recognized speech; a standalone wake phrase arms one next request."""
+    def __init__(self, keyword='Osiris', timeout=15, clock=time.monotonic):
+        self.keyword = keyword.strip().strip('!！.。 ').strip()
+        if not self.keyword:
+            raise ValueError('Wake word must contain text')
+        self.pattern = re.compile(r'(?<![A-Za-z0-9_])' + re.escape(self.keyword) +
+                                  r'(?![A-Za-z0-9_])', re.IGNORECASE)
+        self.timeout = timeout
+        self.clock = clock
+        self.reset()
+
+    def reset(self):
+        self.deadline = None
+
+    @property
+    def waiting(self):
+        if self.deadline is not None and self.clock() >= self.deadline:
+            self.reset()
+        return self.deadline is None
+
+    def accept(self, text):
+        text = text.strip()
+        if not text:
+            return None
+        match = self.pattern.search(text)
+        if match:
+            request = text[match.end():].lstrip(' \t\r\n!！.,，。:：;；?？-—')
+            if not request:
+                self.deadline = self.clock() + self.timeout
+                return None
+            self.reset()
+            return request
+        if not self.waiting:
+            self.reset()
+            return text
+        return None
+
+
+def show_wake_state(box, gate):
+    waiting = gate.waiting
+    message = (f'Say "{gate.keyword}!" to wake me.\nOr say wake word + request.' if waiting else
+               f'Awake! Speak your request.\nWaiting up to {gate.timeout:g} seconds.')
+    box.expression('listening')
+    box.display(message, 'en')
+    print(message.replace('\n', ' '), flush=True)
+    return waiting
+
+
 def pcm_level(pcm):
     samples = array('h')
     samples.frombytes(pcm)
@@ -27,7 +76,7 @@ def pcm_level(pcm):
 
 
 def listen_once(box, recognizer, seconds=4, save_recording=None, automatic=False, threshold=80, silence=1.0,
-                announce=True):
+                announce=True, wake_waiting=False):
     """Recognize one contiguous device recording without an amplitude gate."""
     language = recognizer.language
     if automatic:
@@ -38,7 +87,8 @@ def listen_once(box, recognizer, seconds=4, save_recording=None, automatic=False
         if not pcm:
             return ''
     else:
-        show_status(box, 'listening', f'Listening ({language}) \U0001F3A4\nSpeak now for {seconds:g} seconds.', 'en')
+        if announce:
+            show_status(box, 'listening', f'Listening ({language}) \U0001F3A4\nSpeak now for {seconds:g} seconds.', 'en')
         print(f'Listening ({language}): speak now for {seconds:g} seconds...', flush=True)
         pcm = box.capture(seconds)
     samples = array('h')
@@ -58,12 +108,14 @@ def listen_once(box, recognizer, seconds=4, save_recording=None, automatic=False
         print('No microphone signal: recording contains only zeros. Check microphone initialization.', flush=True)
         box.display('No microphone signal\nPCM is all zeros.\nCheck codec initialization.', 'en')
         return ''
-    show_status(box, 'thinking', 'Recognizing speech... \U0001F914', 'en')
+    if not wake_waiting:
+        show_status(box, 'thinking', 'Recognizing speech... \U0001F914', 'en')
     text = recognizer.transcribe(pcm)
     if not text:
         print(f'No speech recognized. Selected model: {language}. '
               'Check the recording and selected language.', flush=True)
-        box.display('No speech recognized\nCheck language and mic audio.\nTrying again...', 'en')
+        if not wake_waiting:
+            box.display('No speech recognized\nCheck language and mic audio.\nTrying again...', 'en')
     return text
 
 
@@ -286,6 +338,10 @@ def main():
     parser.add_argument('--threshold', type=float, default=80)
     parser.add_argument('--silence', type=float, default=1.0)
     parser.add_argument('--keyboard-only', action='store_true')
+    parser.add_argument('--wake-word', default='Osiris', help='Wake phrase (default: Osiris)')
+    parser.add_argument('--no-wake-word', action='store_true', help='Send spoken requests without waking first')
+    parser.add_argument('--wake-timeout', type=float, default=15,
+                        help='Seconds to accept a request after a standalone wake phrase (default: 15)')
     parser.add_argument('--pi-no-extensions', action='store_true',
                         help='Disable Pi extension discovery for troubleshooting')
     parser.add_argument('--music-dir', type=Path, default=Path('~/Music').expanduser(),
@@ -310,6 +366,14 @@ def main():
         parser.error('Threshold must be 1..32768 and silence 0.25..5 seconds')
     if not 0.1 <= args.record_seconds <= 10:
         parser.error('Recording length must be 0.1..10 seconds')
+    if not 1 <= args.wake_timeout <= 120:
+        parser.error('Wake timeout must be 1..120 seconds')
+    try:
+        wake_gate = None if args.no_wake_word or args.keyboard_only else WakeWordGate(
+            args.wake_word, args.wake_timeout)
+    except ValueError as exc:
+        parser.error(str(exc))
+    wake_ui = None
     recognizer = None if args.keyboard_only else create_recognizer(
         args.language, args.stt_backend, args.whisper_model)
     commands = queue.Queue(maxsize=16)
@@ -324,6 +388,8 @@ def main():
             print('Firmware:', box.status, flush=True)
             print('BOX-3 voice agent ready. Listening is paused during Pi requests and playback.')
             while True:
+                if wake_gate is not None and wake_ui != wake_gate.waiting:
+                    wake_ui = show_wake_state(box, wake_gate)
                 try:
                     box.poll_transport()
                 except (RuntimeError, ValueError) as exc:
@@ -337,10 +403,13 @@ def main():
                     if args.capture_mode == 'auto':
                         text = listen_once(box, recognizer, save_recording=args.save_recording,
                                            automatic=True, threshold=args.threshold, silence=args.silence,
-                                           announce=not listening_announced)
+                                           announce=wake_gate is None and not listening_announced,
+                                           wake_waiting=wake_gate is not None and wake_gate.waiting)
                         listening_announced = True
                     elif args.capture_mode == 'window':
-                        text = listen_once(box, recognizer, args.record_seconds, args.save_recording)
+                        text = listen_once(box, recognizer, args.record_seconds, args.save_recording,
+                                           announce=wake_gate is None,
+                                           wake_waiting=wake_gate is not None and wake_gate.waiting)
                     else:
                         # Experimental VAD batches have transfer gaps. Prefer
                         # window mode when recognition is unreliable.
@@ -355,6 +424,10 @@ def main():
                     if not text:
                         continue
                     listening_announced = False
+                    if wake_gate is not None:
+                        text = wake_gate.accept(text)
+                        if text is None:
+                            continue
                 if text == '/quit':
                     break
                 if text.startswith('/transport'):
@@ -392,6 +465,9 @@ def main():
                     box.expression('error')
                     box.display('Request failed \u274C\nSee host terminal.', 'en')
                 finally:
+                    if wake_gate is not None:
+                        wake_gate.reset()
+                        wake_ui = None
                     vad.reset()
                     listening_announced = False
                     # Discard the first post-playback batch to reduce stale DMA
