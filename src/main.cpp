@@ -68,6 +68,9 @@ public:
     t_cfg.x_max = 319;
     t_cfg.y_min = 0;
     t_cfg.y_max = 239;
+    // BOX-3 touch axes are mounted 180 degrees from the panel's native axes.
+    // Let LGFX combine this offset with lcd.setRotation(2) for all getTouch calls.
+    t_cfg.offset_rotation = 2;
     t_cfg.pin_int = 3;
     t_cfg.pin_rst = -1;
     t_cfg.bus_shared = false;
@@ -85,6 +88,7 @@ public:
 LGFX lcd;
 
 WiFiManager wifiManager;
+#include "cloud_settings.h"
 String setupSSID;
 constexpr char SETUP_PASSWORD[] = "box3setup";
 constexpr uint32_t WIFI_CONNECT_MS = 15000;
@@ -107,12 +111,12 @@ void drawSettingsBar() {
     lcd.setCursor(4, 226);
     lcd.print("192.168.4.1  PW: box3setup");
   } else {
-    lcd.printf("Via: %s%s", agentUsesWiFi ? "WiFi" : "USB",
-               requestedWiFi != agentUsesWiFi ? " (switch pending)" : "");
+    lcd.printf("Via: %s%s", directCloudEnabled() ? cloudMode.c_str() : agentUsesWiFi ? "WiFi" : "USB",
+               !directCloudEnabled() && requestedWiFi != agentUsesWiFi ? " (switch pending)" : "");
     lcd.setCursor(4, 226);
     lcd.print(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() :
               wifiStartupPending ? "WiFi connecting..." : "WiFi offline");
-    if (hostHasUSB && hostHasWiFi && WiFi.status() == WL_CONNECTED) {
+    if (!directCloudEnabled() && hostHasUSB && hostHasWiFi && WiFi.status() == WL_CONNECTED) {
       lcd.fillRoundRect(194, 213, 60, 26, 4, TFT_BLUE);
       lcd.setTextColor(TFT_WHITE, TFT_BLUE);
       lcd.setCursor(199, 222);
@@ -141,7 +145,8 @@ void setupWiFi() {
   wifiManager.setConfigPortalTimeout(180);
   wifiManager.setConnectTimeout(10);
   wifiManager.setSaveConnectTimeout(10);
-  std::vector<const char *> menu = {"wifi", "info", "exit"};
+  setupCloudSettings();
+  std::vector<const char *> menu = {"wifi", "param", "info", "exit"};
   wifiManager.setMenu(menu);
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
@@ -1042,6 +1047,8 @@ void pollAgent() {
   }
 }
 
+#include "direct_cloud.h"
+
 void setup() {
   // HWCDC drops bytes when its default 256-byte RX queue fills. A hex audio
   // command is over 1000 bytes; reserve room for the longest accepted line.
@@ -1106,10 +1113,29 @@ void setup() {
   lcd.drawRect(20, 180, 280, 25, TFT_DARKGREY);
   setupWiFi();
   agentServer.begin();
+  resetDirectCloud();
 }
 
 void loop() {
   pollSettings();
+  if (subscriptionCredentialError.length()) {
+    cloudScreen("error", subscriptionCredentialError);
+    subscriptionCredentialError = "";
+  }
+  if (cloudSettingsChanged) {
+    cloudSettingsChanged = false;
+    agentClient.stop(); cancelPlayback(); releaseRecording();
+    resetDirectCloud(); drawSettingsBar();
+  }
+  if (directCloudEnabled()) {
+    // The standalone firmware owns the codecs; never accept host audio commands.
+    if (agentServer.hasClient()) {
+      WiFiClient extra = agentServer.accept();
+      extra.println("BOX1 ERR standalone_mode"); extra.stop();
+    }
+    for (size_t n = 0; Serial.available() && n < 4096; ++n) Serial.read();
+    pollDirectCloud(); delay(1); return;
+  }
   pollAgent();
   // Prioritize the next stop-and-wait USB packet. A blocking idle microphone
   // read after every DATA/READ packet adds seconds before playback can start.

@@ -1,5 +1,12 @@
 # USB / Wi-Fi bridge for the Pi coding-agent CLI
 
+For **standalone operation without Python**, use the firmware's Settings → Setup
+page to select `openai` or `gemini` and save API/model settings. See the
+[root README](../README.md#standalone-openai--gemini-voice--no-python-host).
+This document describes the optional host-assisted mode; select `host` on the
+device to use its USB/TCP bridge.
+
+
 For Wi-Fi operation, flash the current firmware, configure Wi-Fi through the
 BOX-3 **Settings** touchscreen button, and put the device and Pi CLI computer
 on the same local network. Use the device IP shown on the display:
@@ -504,3 +511,64 @@ The voice agent automatically shows sleeping while waiting for the wake word,
 and listening after waking. New firmware advertises `emojistates=1`; the Python
 client uses compatible older expressions if that capability is absent.
 The same artwork is included in the supported inline emoji set at 16×16.
+
+## Reply providers: Pi, OpenAI, and Gemini
+
+Pi remains the default. The standalone voice agent can also request text replies
+from OpenAI or Gemini directly, without installing or launching Pi CLI. Speech
+recognition, wake gating, synthesis, music decoding, and device transport still
+run on the host. The 30-second follow-up window applies to every provider.
+
+| Provider | Startup option | Host credential | Model configuration |
+| --- | --- | --- | --- |
+| Pi CLI | `--provider pi` (default) | Existing Pi configuration | Existing Pi configuration |
+| OpenAI | `--provider openai` | `OPENAI_API_KEY` | `--model` or `BOX3_OPENAI_MODEL` |
+| Gemini | `--provider gemini` | `GEMINI_API_KEY` | `--model` or `BOX3_GEMINI_MODEL` |
+
+Choose a model ID available to your API account. No cloud model is hardcoded.
+Set the relevant key in your host environment, then start one provider:
+
+```bash
+# OpenAI — replace both placeholders with your own values.
+export OPENAI_API_KEY='YOUR_OPENAI_API_KEY'
+export BOX3_OPENAI_MODEL='YOUR_OPENAI_MODEL_ID'
+host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --provider openai
+
+# Gemini — use this instead to select Gemini.
+export GEMINI_API_KEY='YOUR_GEMINI_API_KEY'
+export BOX3_GEMINI_MODEL='YOUR_GEMINI_MODEL_ID'
+host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --provider gemini
+```
+
+Use your actual BOX-3 IP, or replace `--host` with `--port /dev/ttyACM0` for USB.
+An explicit `--model MODEL_ID` overrides the selected provider's model environment
+variable. For keyboard prompts, add `--keyboard-only`; speech playback still uses
+the existing local voices. No extra Python SDK or firmware update is required.
+
+The terminal identifies the selected provider and model, and cloud replies are
+labeled OpenAI or Gemini on the display. Cloud conversations retain the most
+recent 12 completed turns in host memory and reset when the process restarts.
+Switching USB/Wi-Fi does not reset that history. Failed, blocked, or empty
+responses do not add a turn.
+
+Direct cloud providers return conversational text; they do not receive Pi's
+coding tools, filesystem access, or web/weather tools. Explicit `/music` and
+supported local song requests continue to be handled by the host. Cloud mode
+sends recognized request text and recent conversation history to the selected
+provider over HTTPS, and requires internet access and an API account with model
+access/quota. API keys stay in the host environment and are not sent to BOX-3.
+Keep real credentials out of committed files. STT/TTS audio is still processed
+locally by the existing pipeline.
+
+The adapters use OpenAI's [Responses API](https://developers.openai.com/api/docs/guides/text)
+and Gemini's [Generate Content API](https://ai.google.dev/gemini-api/docs/generate-content/text-generation).
+For HTTP authentication, model-access, quota, or rate-limit errors, check the
+selected API account and model ID. No live cloud calls are made by the tests.
+
+## ESP32 subscription prototype
+
+The firmware's experimental `chatgpt` mode imports app/device-specific OAuth
+credentials for text inference and uses a separate OpenAI API key for speech.
+It runs without this Python host at runtime, but does not implement first-time
+account login on ESP32. See the [prototype setup and limitations](../README.md#experimental-chatgpt-subscription-adapter).
+Gemini subscription-account login is not implemented; its API mode remains available.

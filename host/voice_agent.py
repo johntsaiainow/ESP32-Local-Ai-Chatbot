@@ -15,6 +15,7 @@ import unicodedata
 import wave
 
 from box3 import Box3, Box3Connection
+from chat_backends import CloudChat
 from offline_speech import create_recognizer, render_music, synthesize
 
 
@@ -259,8 +260,8 @@ def conversation_pages(text, language, width=208, rows=6):
         yield '\n'.join(lines + ([line] if line else []))
 
 
-def show_user_message(box, text):
-    print(f'\nYou: {text}\nPi: replying...\n', flush=True)
+def show_user_message(box, text, agent_name='Pi'):
+    print(f'\nYou: {text}\n{agent_name}: replying...\n', flush=True)
     box.expression('thinking')
     language = reply_language(text)
     pages = list(conversation_pages(text, language))
@@ -270,14 +271,14 @@ def show_user_message(box, text):
             time.sleep(2)
 
 
-def speak_reply(box, text, temp):
-    print(f'\nPi: {text}\n', flush=True)
+def speak_reply(box, text, temp, agent_name='Pi'):
+    print(f'\n{agent_name}: {text}\n', flush=True)
     box.expression('speaking')
     language = reply_language(text)
     pages = list(conversation_pages(text, language))
     output = Path(temp) / 'reply.wav'
     for index, page in enumerate(pages):
-        box.display(f'Pi ({index + 1}/{len(pages)})\n{page}', language)
+        box.display(f'{agent_name} ({index + 1}/{len(pages)})\n{page}', language)
         started = time.monotonic()
         print(f'Synthesizing speech ({index + 1}/{len(pages)})...', flush=True)
         synthesize(page.replace('\n', ' '), output, language)
@@ -335,6 +336,9 @@ def connection_options(port=None, host=None, tcp_port=8233, preferred=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--provider', choices=('pi', 'openai', 'gemini'), default='pi',
+                        help='Reply backend (default: pi)')
+    parser.add_argument('--model', help='Cloud model ID, or set BOX3_OPENAI_MODEL / BOX3_GEMINI_MODEL')
     parser.add_argument('--port', help='USB port or socket://HOST:PORT (default: BOX3_PORT)')
     parser.add_argument('--host', help='BOX-3 Wi-Fi IP or hostname (default: BOX3_HOST)')
     parser.add_argument('--transport', choices=('usb', 'wifi'), help='Initial transport when both endpoints are configured')
@@ -386,6 +390,11 @@ def main():
             args.wake_word, args.wake_timeout, followup_timeout=args.followup_timeout)
     except ValueError as exc:
         parser.error(str(exc))
+    try:
+        cloud = None if args.provider == 'pi' else CloudChat(args.provider, args.model)
+    except ValueError as exc:
+        parser.error(str(exc))
+    agent_name = {'pi': 'Pi', 'openai': 'OpenAI', 'gemini': 'Gemini'}[args.provider]
     wake_ui = None
     recognizer = None if args.keyboard_only else create_recognizer(
         args.language, args.stt_backend, args.whisper_model)
@@ -397,7 +406,8 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix='box3-agent-') as temp:
             session = Path(temp) / 'pi-session.jsonl'
-            box.display('Pi voice agent ready \U0001F916 \U0001F3A4', 'en')
+            box.display(agent_name + ' voice agent ready \U0001F916 \U0001F3A4', 'en')
+            print(f'Reply provider: {agent_name}' + (f' | Model: {cloud.model}' if cloud else ''), flush=True)
             print('Firmware:', box.status, flush=True)
             print('BOX-3 voice agent ready. Listening is paused during Pi requests and playback.')
             while True:
@@ -458,7 +468,7 @@ def main():
                         source = Path(text[7:].strip()).expanduser()
                         play_local_music(box, source, temp, args.music_backend)
                     else:
-                        show_user_message(box, text)
+                        show_user_message(box, text, agent_name)
                         query = music_query(text)
                         if query is not None:
                             matches = find_local_music(args.music_dir.expanduser(), query)
@@ -470,8 +480,9 @@ def main():
                             else:
                                 speak_reply(box, '\u672C\u6A5F\u97F3\u6A02\u8CC7\u6599\u593E\u627E\u4E0D\u5230\u9019\u9996\u6B4C\u3002\u8ACB\u5148\u653E\u5165\u97F3\u6A02\u6A94\uFF0C\u518D\u8AAA\u6B4C\u540D\u3002', temp)
                         else:
-                            reply = ask_pi(text, session, no_extensions=args.pi_no_extensions)
-                            speak_reply(box, reply, temp)
+                            reply = cloud.ask(text) if cloud is not None else ask_pi(
+                                text, session, no_extensions=args.pi_no_extensions)
+                            speak_reply(box, reply, temp, agent_name)
                     response_completed = True
                 except (Exception, KeyboardInterrupt) as exc:
                     if isinstance(exc, KeyboardInterrupt):

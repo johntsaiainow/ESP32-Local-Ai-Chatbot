@@ -1,10 +1,12 @@
 # ESP32 Local AI Chatbot
 
-**An ESP32-S3-BOX-3 voice and display terminal for a locally hosted AI coding agent.**
+**An ESP32-S3-BOX-3 voice assistant with standalone cloud and host-assisted modes.**
 
-Turn an ESP32-S3-BOX-3 into a compact conversational interface with multilingual text, color emoji expressions, microphone input, speaker output, and USB or Wi-Fi connectivity to a Linux or macOS host. Speech recognition and synthesis run on the host rather than on the ESP32.
-
-> **Architecture note:** “Local AI” refers to the host-side voice pipeline and agent integration. The ESP32 handles display, audio capture/playback, and transport; it does not run the language model itself. The Pi agent's inference backend depends on your Pi configuration and may be local or remote.
+Use the BOX-3 on its own with OpenAI or Gemini over Wi-Fi, or connect it over
+USB/TCP to a Linux/macOS host for Pi coding-agent integration and local speech
+processing. Both modes provide microphone capture, speaker playback,
+multilingual text, and Osiris color emoji expressions. The language model runs
+on the provider or configured host backend, rather than on the ESP32 itself.
 
 ## Features
 
@@ -15,12 +17,23 @@ Turn an ESP32-S3-BOX-3 into a compact conversational interface with multilingual
 - **Osiris wake phrase:** say “Osiris!” before a spoken request, with a 15-second follow-up window and sleeping/listening emoji feedback.
 - **WiFi Manager:** saved Wi-Fi credentials, automatic setup hotspot on startup connection failure, and an on-screen Settings button.
 - **Offline speech processing:** faster-whisper for speech-to-text, OpenCC for Traditional Chinese conversion, and Piper for text-to-speech.
+- **Standalone cloud voice:** configure OpenAI or Gemini on the device; record, transcribe, chat, and speak without a Python host.
+- **Host-assisted providers:** Pi coding agent by default, with optional OpenAI/Gemini text adapters in the host script.
 - **Pi coding-agent integration:** optional Pi extension tools and a standalone conversational voice agent.
 - **Local music playback:** decode files from a local music directory with mpv and stream them to the BOX-3 speaker.
 - **Robust audio transport:** offset and CRC32 validation, retries, synchronization, and PSRAM-buffered continuous playback on compatible firmware.
 - **Linux-first workflow:** PlatformIO, Python virtual environments, and terminal-based diagnostics.
 
 ## System architecture
+
+Standalone mode:
+
+```text
+BOX-3 microphone → Wi-Fi HTTPS → OpenAI / Gemini
+BOX-3 speaker    ← Wi-Fi HTTPS ← cloud speech synthesis
+```
+
+Host-assisted mode:
 
 ```text
 ESP32-S3-BOX-3                    Linux / macOS host
@@ -32,7 +45,7 @@ ESP32-S3-BOX-3                    Linux / macOS host
           USB or Wi-Fi TCP:8233   └─────────────────────────────┘
 ```
 
-The device captures audio and displays responses; the host performs recognition, agent execution, speech generation, and optional music decoding. Recording and playback are sequential; this is not a full-duplex echo-canceling voice system.
+In host-assisted mode the device captures audio and displays responses; the host performs recognition, agent execution, speech generation, and optional music decoding. Recording and playback are sequential; this is not a full-duplex echo-canceling voice system.
 
 ## Hardware and software
 
@@ -41,10 +54,10 @@ The device captures audio and displays responses; the host performs recognition,
 | Device | ESP32-S3-BOX-3 |
 | Firmware | Arduino framework via PlatformIO / pioarduino |
 | Display library | LovyanGFX |
-| Host | Linux or macOS (POSIX serial access) |
-| Connection | Native USB data cable, or Wi-Fi LAN with TCP port 8233 reachable |
+| Host | Optional for standalone cloud; Linux/macOS for host-assisted operation |
+| Connection | Internet Wi-Fi for standalone cloud; USB or LAN TCP:8233 for host mode |
 | Power | USB power is still required during Wi-Fi operation |
-| Host runtime | Python 3, virtual environment, Pi CLI for agent features |
+| Host runtime | Python 3, virtual environment; Pi CLI only for the Pi backend |
 | Speech | faster-whisper, OpenCC, Piper voice models |
 | Music | mpv; ffmpeg alternative |
 | Audio format | 16 kHz, mono, signed 16-bit PCM WAV |
@@ -70,6 +83,10 @@ ESP32-Local-Ai-Chatbot/
 ```
 
 ## Quick start
+
+For operation without host scripts, build/flash step 1 and follow
+[Standalone OpenAI / Gemini voice](#standalone-openai--gemini-voice--no-python-host).
+The remaining host setup steps are optional in that mode.
 
 ### 1. Clone and build firmware
 
@@ -237,9 +254,214 @@ The extension exposes:
 
 Within Pi, `/box-listen en` or `/box-listen zh` records an utterance and submits the transcript. The standalone voice agent and Pi USB extension **must not access the same serial port simultaneously**.
 
+## Standalone OpenAI / Gemini voice — no Python host
+
+The BOX-3 can connect directly to OpenAI or Gemini using its own Wi-Fi and verified
+HTTPS. In this mode no Python script, Pi CLI, PC speech model, or host service
+is needed at runtime. The device records microphone audio, requests cloud
+transcription, obtains a conversational reply, requests cloud speech, and plays
+it through its built-in speaker. USB is only needed for flashing and power.
+
+1. Flash the updated firmware with `pio run --target upload`.
+2. Tap **Settings**, connect to the displayed `BOX3-Setup-XXXX` hotspot
+   (password `box3setup`), and open **http://192.168.4.1**.
+3. Use **Configure WiFi** to join an internet-connected network.
+4. Open **Setup** in the portal and fill in the fields below, then **Save**.
+5. Exit the portal. Wait for Wi-Fi/network time, then say **“Osiris!”**.
+   Speak your question after the listening state appears, or include the question
+   after the wake word. After each spoken answer, Osiris accepts follow-ups for
+   30 seconds without another wake word.
+
+| Portal field | OpenAI | Gemini |
+| --- | --- | --- |
+| Mode | `openai` | `gemini` |
+| OpenAI / Gemini API key | Fill the OpenAI field | Fill the Gemini field |
+| Chat model ID | A model supporting Responses text generation | A Generate Content model supporting text and inline WAV audio |
+| OpenAI transcription model | Defaults to `gpt-4o-mini-transcribe`; change if needed | Not used; the chat model transcribes audio |
+| Speech model ID | A model supporting `/v1/audio/speech` with PCM output | A Gemini TTS model supporting Generate Content audio output |
+| Voice | Blank defaults to `alloy` | Blank defaults to `Kore` |
+
+Choose chat and speech model IDs enabled for your API account; these fields are
+required and are separate because a chat model is not necessarily a speech model.
+OpenAI and Gemini keys are saved separately. Leaving a key field blank keeps its
+saved value; enter `-` to clear it. Saved keys are never filled back into the
+portal or printed to serial. Settings persist in device NVS across restarts;
+NVS encryption is not configured by this project. Provision credentials through
+the device hotspot on a trusted connection.
+
+The footer identifies the direct provider. Change Mode back to **`host`** to use
+the existing USB/TCP Python/Pi workflow. The default remains `host`, so flashing
+alone does not start cloud requests. Host audio commands are unavailable while
+standalone mode owns the microphone/speaker. Switching modes clears the direct
+conversation, which otherwise retains four completed turns in RAM.
+
+Standalone wake matching uses **cloud transcription**, not an on-device trained
+keyword model. While standalone mode is selected, speech detected by the local
+amplitude gate is uploaded even while waiting for the wake word. Transcription,
+chat, and speech use your provider account and quota. Questions and conversation
+context also go to that provider. Listening pauses during HTTP requests and
+playback. Recordings are limited to ten seconds; replies are requested to be
+short. Speech is downloaded into a bounded PSRAM buffer before playback, so
+this is a sequential voice interface rather than a realtime streaming call.
+The Settings portal is paused during blocking cloud requests and playback.
+
+TLS uses the ESP32 framework CA bundle and network time; certificate verification
+is enabled. A blocked NTP connection, invalid model/key, exhausted quota, or API
+error appears on the display. PSRAM and working microphone/speaker initialization
+are required. Direct mode has no Pi coding tools, filesystem tools, live weather
+lookup, or host music playback.
+
+Implementation references:
+[OpenAI transcription](https://developers.openai.com/api/docs/guides/speech-to-text),
+[OpenAI speech](https://developers.openai.com/api/docs/guides/text-to-speech),
+[Gemini audio input](https://ai.google.dev/gemini-api/docs/generate-content/audio), and
+[Gemini speech output](https://ai.google.dev/gemini-api/docs/generate-content/speech-generation).
+Build and helper checks do not replace live API and real-device validation.
+
+## Experimental ChatGPT subscription adapter
+
+The firmware now has an **experimental `chatgpt` mode** for subscription-authorized
+text inference using separately imported OAuth credentials. It does **not** provide
+a working first-time browser login on ESP32. A valid app/device-specific OAuth
+registration must already have been provisioned through the official sign-in
+flow. This prototype is not a claim that the ESP32 loopback-login limitation has
+been solved. No account has been connected or live subscription request verified.
+
+In **Settings → Setup**:
+
+1. Set Mode to `chatgpt`.
+2. In **OAuth JSON**, import credentials issued for this app/device. Do not use
+   another application's bundled client ID, account password, browser cookie,
+   or credentials belonging to someone else. Do not paste actual tokens into chat
+   or commit them to this repository.
+3. Keep an **OpenAI API key** and valid transcription/speech model IDs for audio.
+   The OAuth credential is used only for text Responses requests.
+4. Set an available subscription chat model ID, or leave Chat model blank to
+   select the first visible model in the account-specific catalog.
+5. Save and exit. The device verifies access through the provider's model and
+   inference endpoints; errors appear on screen. API voice calls still incur API
+   usage even if subscription inference subsequently fails.
+
+The import accepts a JSON object containing `access_token`, `refresh_token`, and
+an issued `client_id` beginning with `oaiapp_`. Optional `expires_at` and
+`earliest_refresh_at` are Unix timestamps; include them from your provisioning
+record when available. `scope` may be a space-separated string or `scopes` an
+array. Missing expiry triggers a refresh before use. Placeholder-only example:
+
+```json
+{
+  "client_id": "oaiapp_YOUR_DEVICE_REGISTRATION",
+  "access_token": "YOUR_OWN_APP_ACCESS_TOKEN",
+  "refresh_token": "YOUR_OWN_APP_REFRESH_TOKEN",
+  "scope": "offline_access resource.invoke chatgpt.tokens.use.direct",
+  "expires_at": 0,
+  "earliest_refresh_at": 0
+}
+```
+
+The import is a bearer-credential provisioning interface, not an OIDC account
+sign-in: it does not trust or display imported identity claims or use ID tokens.
+The model/inference server authorizes imported access tokens; refreshed scopes
+are checked for ChatGPT plan grants. Tokens are saved together in NVS, including
+rotating refresh tokens, without being echoed into the portal. Blank preserves
+the record; enter `-` to sign out locally. NVS encryption is not enabled.
+
+Text inference uses streaming Responses requests with `store=false` and
+`stream=true`, a bounded SSE decoder, and the existing four-turn device history.
+The device refreshes access when needed, checks the account model catalog, and
+rejects incomplete/error streams. **It never silently falls back to paid API
+chat** if subscription access fails. Speech stays on the existing OpenAI API
+transcription and synthesis path. Gemini remains in its API mode; Google-account
+subscription login is not implemented on the ESP32.
+
+The official ChatGPT open-source sign-in flow still requires a callback listener
+at `127.0.0.1` on the browser's machine. A phone browser points that address at
+the phone, not BOX-3. External initial provisioning remains necessary for this
+experimental import path; no Python or Node.js service runs during inference.
+
+Google AI Pro / Ultra subscribers may have eligible monthly developer credits.
+To use those benefits with the existing **standalone Gemini API mode**:
+
+1. In a browser, sign in with the subscribed Google account and activate its
+   eligible Google Developer Program benefits.
+2. Follow AI Studio billing setup for the project that will issue the Gemini
+   API key. Confirm that the specific credits are eligible and applied to that
+   project's billing account. Prepay accounts require an active prepaid balance
+   before eligible promotional Cloud credits can be consumed.
+3. Create the project's Gemini API key and enter it in the BOX-3 Setup page,
+   with Mode `gemini` and suitable chat/speech model IDs.
+4. Run the device directly; no Python or Node.js service is required.
+
+This uses the API project's billing and eligible credits, not Gemini app chat
+quota. Benefits and credit eligibility depend on the account/plan; firmware
+cannot activate benefits, inspect subscription status, or guarantee zero API
+charges. Google account login for the Gemini CLI is a separate route and is not
+ported into this firmware. First-time ChatGPT sign-in remains unavailable on this firmware; the experimental
+adapter only operates after separate, valid app-specific credential provisioning.
+Ordinary OpenAI API mode stays available.
+
+Official references: [ChatGPT registration and loopback callback](https://developers.openai.com/siwc/token-sharing-open-source/sign-in),
+[ChatGPT plan limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations),
+[Gemini CLI Google authentication](https://geminicli.com/docs/get-started/authentication/),
+[Google subscription developer benefits](https://blog.google/innovation-and-ai/technology/developers-tools/gdp-premium-ai-pro-ultra/),
+and [Gemini API credit billing](https://ai.google.dev/gemini-api/docs/billing).
+
+## Optional host-script reply providers
+
+Pi remains the default. The standalone voice agent can also request text replies
+from OpenAI or Gemini directly, without installing or launching Pi CLI. Speech
+recognition, wake gating, synthesis, music decoding, and device transport still
+run on the host. The 30-second follow-up window applies to every provider.
+
+| Provider | Startup option | Host credential | Model configuration |
+| --- | --- | --- | --- |
+| Pi CLI | `--provider pi` (default) | Existing Pi configuration | Existing Pi configuration |
+| OpenAI | `--provider openai` | `OPENAI_API_KEY` | `--model` or `BOX3_OPENAI_MODEL` |
+| Gemini | `--provider gemini` | `GEMINI_API_KEY` | `--model` or `BOX3_GEMINI_MODEL` |
+
+Choose a model ID available to your API account. No cloud model is hardcoded.
+Set the relevant key in your host environment, then start one provider:
+
+```bash
+# OpenAI — replace both placeholders with your own values.
+export OPENAI_API_KEY='YOUR_OPENAI_API_KEY'
+export BOX3_OPENAI_MODEL='YOUR_OPENAI_MODEL_ID'
+host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --provider openai
+
+# Gemini — use this instead to select Gemini.
+export GEMINI_API_KEY='YOUR_GEMINI_API_KEY'
+export BOX3_GEMINI_MODEL='YOUR_GEMINI_MODEL_ID'
+host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --provider gemini
+```
+
+Use your actual BOX-3 IP, or replace `--host` with `--port /dev/ttyACM0` for USB.
+An explicit `--model MODEL_ID` overrides the selected provider's model environment
+variable. For keyboard prompts, add `--keyboard-only`; speech playback still uses
+the existing local voices. No extra Python SDK or firmware update is required.
+
+The terminal identifies the selected provider and model, and cloud replies are
+labeled OpenAI or Gemini on the display. Cloud conversations retain the most
+recent 12 completed turns in host memory and reset when the process restarts.
+Switching USB/Wi-Fi does not reset that history. Failed, blocked, or empty
+responses do not add a turn.
+
+Direct cloud providers return conversational text; they do not receive Pi's
+coding tools, filesystem access, or web/weather tools. Explicit `/music` and
+supported local song requests continue to be handled by the host. Cloud mode
+sends recognized request text and recent conversation history to the selected
+provider over HTTPS, and requires internet access and an API account with model
+access/quota. API keys stay in the host environment and are not sent to BOX-3.
+Keep real credentials out of committed files. STT/TTS audio is still processed
+locally by the existing pipeline.
+
+The adapters use OpenAI's [Responses API](https://developers.openai.com/api/docs/guides/text)
+and Gemini's [Generate Content API](https://ai.google.dev/gemini-api/docs/generate-content/text-generation).
+For HTTP authentication, model-access, quota, or rate-limit errors, check the
+selected API account and model ID. No live cloud calls are made by the tests.
+
 ## Wake phrase: Osiris!
 
-Spoken requests now require **Osiris** by default over USB or Wi-Fi:
+Spoken requests require **Osiris** by default in the host voice agent and standalone cloud mode:
 
 - Say **“Osiris, what is the weather?”** in one utterance, or
 - Say **“Osiris!”**, wait for **Awake!** on the display, then speak one request
@@ -262,8 +484,8 @@ host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --wake-word 'Hey O
 host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --no-wake-word
 ```
 
-Wake detection uses the existing host speech-to-text transcript, rather than a
-separate trained keyword model. Audio still travels to the host and is recognized
+In host mode, wake detection uses the existing host speech-to-text transcript, rather than a
+separate trained keyword model. Standalone mode uses the cloud transcription described above. Audio still travels to the host and is recognized
 while waiting; requests only go to Pi after the wake phrase matches. Recognition
 accuracy and wake response time depend on the speech model and language setting;
 `--language auto` allows the English wake phrase with Chinese or English requests.
@@ -382,6 +604,14 @@ host/.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 g++ -std=c++17 tests/test_utf8.cpp -o /tmp/box3-test-utf8
 /tmp/box3-test-utf8
 
+# Subscription SSE framing checks
+g++ -std=c++17 -Wall -Wextra -Werror tests/test_subscription_sse.cpp -o /tmp/box3-subscription-sse
+/tmp/box3-subscription-sse
+
+# Standalone WAV / wake-word utility checks
+g++ -std=c++17 -Wall -Wextra -Werror tests/test_cloud_voice_utils.cpp -o /tmp/box3-cloud-utils
+/tmp/box3-cloud-utils
+
 # Firmware compilation
 pio run
 
@@ -421,7 +651,7 @@ Automated tests and successful compilation do not substitute for hardware verifi
 
 ## Project scope
 
-This is a **host-assisted local voice terminal**, not an on-device ESP32 language model. Speech recognition and synthesis can run offline after their models are installed. Pi agent capabilities, tool access, and whether inference requires a network depend on the host configuration. The project does not currently provide full-duplex voice, acoustic echo cancellation, unrestricted emoji rendering, or cloud music search.
+This is a **voice terminal with standalone cloud and host-assisted modes**, not an on-device ESP32 language model. Speech recognition and synthesis can run offline after their models are installed. Pi agent capabilities, tool access, and whether inference requires a network depend on the host configuration. The project does not currently provide full-duplex voice, acoustic echo cancellation, unrestricted emoji rendering, or cloud music search.
 
 ## License
 
