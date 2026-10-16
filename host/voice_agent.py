@@ -1,4 +1,4 @@
-"""Offline voice and keyboard interface between Pi CLI and the USB ESP-BOX-3."""
+"""Offline voice and keyboard interface between Pi CLI and ESP-BOX-3 over USB or Wi-Fi."""
 import argparse
 from array import array
 from collections import deque
@@ -14,7 +14,7 @@ import time
 import unicodedata
 import wave
 
-from box3 import Box3
+from box3 import Box3, Box3Connection
 from offline_speech import create_recognizer, render_music, synthesize
 
 
@@ -131,7 +131,7 @@ def ask_pi(text, session, timeout=180, no_extensions=False):
               'Avoid code blocks unless explicitly requested. Do not claim to search for or play music; '
               'music playback is handled by the host using local files. '
               'Use available weather or web tools for current weather; never invent live conditions. '
-              'Do not access the BOX-3 serial port; the voice host owns it. User request:\n' + text)
+              'Do not access BOX-3 over USB or TCP; the voice host owns the device connection. User request:\n' + text)
     argv = ['pi', '--print', '--thinking', 'off',
             '--exclude-tools', 'box3_*,get_room_temperature,jukebox_control']
     if no_extensions:
@@ -148,7 +148,7 @@ def ask_pi(text, session, timeout=180, no_extensions=False):
 def keyboard_loop(commands):
     while True:
         try:
-            text = input('Prompt (/quit to exit, /music PATH to play): ').strip()
+            text = input('Prompt (/quit, /music PATH, /transport usb|wifi|status): ').strip()
         except (EOFError, KeyboardInterrupt):
             return
         if text:
@@ -257,9 +257,27 @@ def play_local_music(box, source, temp, backend='mpv'):
     box.play(output, progress=lambda message: print(message, flush=True))
 
 
+def connection_options(port=None, host=None, tcp_port=8233, preferred=None):
+    explicit = 'wifi' if host else ('wifi' if port.startswith('socket://') else 'usb') if port else None
+    port = port or os.environ.get('BOX3_PORT')
+    host = host or os.environ.get('BOX3_HOST')
+    endpoints = {}
+    if port:
+        endpoints['wifi' if port.startswith('socket://') else 'usb'] = port
+    if host:
+        endpoints['wifi'] = f'socket://{host}:{tcp_port}'
+    selected = preferred or explicit or ('wifi' if 'wifi' in endpoints else 'usb')
+    if endpoints and selected not in endpoints:
+        raise ValueError(f'{selected.upper()} endpoint is not configured')
+    return endpoints, selected
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--port', default=os.environ.get('BOX3_PORT'))
+    parser.add_argument('--port', help='USB port or socket://HOST:PORT (default: BOX3_PORT)')
+    parser.add_argument('--host', help='BOX-3 Wi-Fi IP or hostname (default: BOX3_HOST)')
+    parser.add_argument('--transport', choices=('usb', 'wifi'), help='Initial transport when both endpoints are configured')
+    parser.add_argument('--tcp-port', type=int, default=8233, help='BOX-3 TCP port (default: 8233)')
     parser.add_argument('--language', choices=('auto', 'en', 'zh'), default='auto',
                         help='Whisper auto supports Chinese/English without switching models')
     parser.add_argument('--stt-backend', choices=('whisper', 'vosk'), default='whisper')
@@ -280,8 +298,14 @@ def main():
     parser.add_argument('--save-recording', type=Path,
                         help='Overwrite this WAV with the latest window for microphone diagnosis')
     args = parser.parse_args()
-    if not args.port:
-        parser.error('Pass --port or set BOX3_PORT')
+    if not 1 <= args.tcp_port <= 65535:
+        parser.error('TCP port must be 1..65535')
+    try:
+        endpoints, preferred = connection_options(args.port, args.host, args.tcp_port, args.transport)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not endpoints:
+        parser.error('Pass --host BOX_IP or --port USB_PORT, or set BOX3_HOST / BOX3_PORT')
     if not 0 < args.threshold <= 32768 or not 0.25 <= args.silence <= 5:
         parser.error('Threshold must be 1..32768 and silence 0.25..5 seconds')
     if not 0.1 <= args.record_seconds <= 10:
@@ -291,7 +315,7 @@ def main():
     commands = queue.Queue(maxsize=16)
     threading.Thread(target=keyboard_loop, args=(commands,), daemon=True).start()
     vad = VoiceActivity(args.threshold, args.silence)
-    box = Box3(args.port)
+    box = Box3Connection(endpoints, preferred)
     listening_announced = False
     try:
         with tempfile.TemporaryDirectory(prefix='box3-agent-') as temp:
@@ -300,6 +324,10 @@ def main():
             print('Firmware:', box.status, flush=True)
             print('BOX-3 voice agent ready. Listening is paused during Pi requests and playback.')
             while True:
+                try:
+                    box.poll_transport()
+                except (RuntimeError, ValueError) as exc:
+                    print('Transport switch:', exc, file=sys.stderr)
                 try:
                     text = commands.get(timeout=0.1) if args.keyboard_only else commands.get_nowait()
                     vad.reset()
@@ -329,6 +357,15 @@ def main():
                     listening_announced = False
                 if text == '/quit':
                     break
+                if text.startswith('/transport'):
+                    target = text.split(maxsplit=1)[1].strip().lower() if ' ' in text else 'status'
+                    try:
+                        if target != 'status':
+                            box.switch(target)
+                        print(f'Transport: {box.active.upper()} | Configured: {", ".join(box.endpoints)}', flush=True)
+                    except (ValueError, RuntimeError) as exc:
+                        print('Transport switch:', exc, file=sys.stderr)
+                    continue
                 try:
                     if text.startswith('/music '):
                         source = Path(text[7:].strip()).expanduser()

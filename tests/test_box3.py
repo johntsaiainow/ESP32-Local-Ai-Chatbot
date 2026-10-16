@@ -91,8 +91,10 @@ class FakeSerial:
                         if self.partial_capture else '')
             reply = f'BOX1 OK bytes={len(self.recording)}{metadata} audio=pull1\n'.encode()
         elif command.startswith('BOX1 READ '):
-            offset = int(command[10:])
-            payload = self.recording[offset:offset + 256]
+            values = command[10:].split()
+            offset = int(values[0])
+            count = int(values[1]) if len(values) > 1 else 256
+            payload = self.recording[offset:offset + count]
             checksum = zlib.crc32(payload)
             fault, self.read_fault = self.read_fault, None
             if fault == 'checksum':

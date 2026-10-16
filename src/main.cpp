@@ -5,6 +5,7 @@
 #include <Wire.h>
 #include <ESP_I2S.h>
 #include <SPI.h>
+#include <WiFiManager.h>
 #include "utf8.h"
 #include "serial_write.h"
 #include "speech_gate.h"
@@ -81,6 +82,109 @@ public:
 };
 
 LGFX lcd;
+
+WiFiManager wifiManager;
+String setupSSID;
+constexpr char SETUP_PASSWORD[] = "box3setup";
+constexpr uint32_t WIFI_CONNECT_MS = 15000;
+uint32_t wifiStarted = 0;
+bool wifiStartupPending = true;
+bool agentUsesWiFi = false;
+bool requestedWiFi = false;
+bool hostHasUSB = false, hostHasWiFi = false;
+
+
+void drawSettingsBar() {
+  const lgfx::IFont *previousFont = lcd.getFont();
+  lcd.setFont(&fonts::Font0);
+  lcd.fillRect(0, 212, 320, 28, TFT_BLACK);
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setCursor(4, 214);
+  const bool setting = wifiManager.getConfigPortalActive();
+  if (setting) {
+    lcd.print(setupSSID);
+    lcd.setCursor(4, 226);
+    lcd.print("192.168.4.1  PW: box3setup");
+  } else {
+    lcd.printf("Via: %s%s", agentUsesWiFi ? "WiFi" : "USB",
+               requestedWiFi != agentUsesWiFi ? " (switch pending)" : "");
+    lcd.setCursor(4, 226);
+    lcd.print(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() :
+              wifiStartupPending ? "WiFi connecting..." : "WiFi offline");
+    if (hostHasUSB && hostHasWiFi && WiFi.status() == WL_CONNECTED) {
+      lcd.fillRoundRect(194, 213, 60, 26, 4, TFT_BLUE);
+      lcd.setTextColor(TFT_WHITE, TFT_BLUE);
+      lcd.setCursor(199, 222);
+      lcd.print("Switch");
+    }
+  }
+  lcd.fillRoundRect(258, 213, 61, 26, 4, TFT_DARKGREY);
+  lcd.setTextColor(TFT_WHITE, TFT_DARKGREY);
+  lcd.setCursor(264, 222);
+  lcd.print(setting ? "Exit" : "Settings");
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setFont(previousFont);
+}
+
+void enterSettingMode() {
+  wifiStartupPending = false;
+  if (!wifiManager.getConfigPortalActive()) {
+    wifiManager.startConfigPortal(setupSSID.c_str(), SETUP_PASSWORD);
+  }
+  drawSettingsBar();
+}
+
+void setupWiFi() {
+  wifiManager.setDebugOutput(false); // Keep credentials off the USB log.
+  wifiManager.setConfigPortalBlocking(false);
+  wifiManager.setConfigPortalTimeout(180);
+  wifiManager.setConnectTimeout(10);
+  wifiManager.setSaveConnectTimeout(10);
+  std::vector<const char *> menu = {"wifi", "info", "exit"};
+  wifiManager.setMenu(menu);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false); // Avoid power-save wakeup latency for interactive audio.
+  setupSSID = "BOX3-Setup-" + WiFi.macAddress().substring(12);
+  setupSSID.replace(":", "");
+  WiFi.begin(); // Reuse credentials stored by WiFiManager in NVS.
+  wifiStarted = millis();
+  drawSettingsBar();
+}
+
+// Poll before USB/audio early returns so Settings remains accessible in playback.
+void pollSettings() {
+  wifiManager.process();
+  if (wifiStartupPending) {
+    if (WiFi.status() == WL_CONNECTED) wifiStartupPending = false;
+    else if (millis() - wifiStarted >= WIFI_CONNECT_MS) enterSettingMode();
+  }
+  static bool touchHeld = false;
+  static uint32_t lastPress = 0;
+  static uint32_t lastTouchPoll = 0;
+  uint16_t x = 0, y = 0;
+  const bool pollTouch = millis() - lastTouchPoll >= 20;
+  const bool touched = pollTouch ? lcd.getTouch(&x, &y) : touchHeld;
+  if (pollTouch) lastTouchPoll = millis();
+  if (pollTouch && touched && !touchHeld && x >= 194 && y >= 212 &&
+      millis() - lastPress >= 300) {
+    lastPress = millis();
+    if (x >= 258) {
+      if (wifiManager.getConfigPortalActive()) wifiManager.stopConfigPortal();
+      else enterSettingMode();
+    } else if (!wifiManager.getConfigPortalActive() && hostHasUSB && hostHasWiFi &&
+               WiFi.status() == WL_CONNECTED) {
+      requestedWiFi = !requestedWiFi;
+    }
+    drawSettingsBar();
+  }
+  touchHeld = touched;
+  static uint32_t lastDraw = 0;
+  if (millis() - lastDraw >= 500) {
+    drawSettingsBar();
+    lastDraw = millis();
+  }
+}
 
 // Compact color emoji artwork for common agent and audio status messages.
 // Unsupported supplementary-plane symbols use a visible placeholder.
@@ -429,14 +533,18 @@ constexpr uint32_t STREAM_IDLE_MS = 60000;
 std::atomic<size_t> streamWritten{0}, streamRead{0};
 std::atomic<bool> streamStop{false}, streamDone{true}, streamFailed{false};
 bool streaming = false;
-uint8_t lastStreamChunk[256];
+uint8_t lastStreamChunk[8192];
+std::atomic<uint32_t> streamUnderruns{0}, streamStallMs{0};
+size_t streamPrefillBytes = 64000;
 size_t lastStreamOffset = 0, lastStreamLength = 0;
 
 void playbackStreamTask(void *) {
   uint32_t lastData = millis();
   size_t previousWritten = 0;
-  // Prefill two seconds; timeout measures inactivity, not total upload time.
-  while (!streamStop && streamWritten < min(playExpected, size_t(64000))) {
+  bool waitingForAudio = false;
+  uint32_t stallStarted = 0;
+  // Wi-Fi prefills 500 ms to absorb network jitter; USB keeps two seconds.
+  while (!streamStop && streamWritten < min(playExpected, streamPrefillBytes)) {
     const size_t written = streamWritten.load();
     if (written != previousWritten) { lastData = millis(); previousWritten = written; }
     if (millis() - lastData > STREAM_IDLE_MS) { streamFailed = true; break; }
@@ -447,9 +555,18 @@ void playbackStreamTask(void *) {
     const size_t offset = streamRead.load();
     const size_t available = streamWritten.load() - offset;
     if (!available) {
+      if (!waitingForAudio) {
+        waitingForAudio = true;
+        stallStarted = millis();
+        ++streamUnderruns;
+      }
       if (millis() - lastData > STREAM_IDLE_MS) streamFailed = true;
       delay(1);
       continue;
+    }
+    if (waitingForAudio) {
+      streamStallMs = streamStallMs.load() + millis() - stallStarted;
+      waitingForAudio = false;
     }
     int16_t stereo[512];
     const size_t count = min(size_t(256), available / 2);
@@ -467,6 +584,7 @@ void playbackStreamTask(void *) {
     streamRead = offset + count * 2;
     lastData = millis();
   }
+  if (waitingForAudio) streamStallMs = streamStallMs.load() + millis() - stallStarted;
   delay(110);
   digitalWrite(46, LOW);
   streamDone = true;
@@ -512,24 +630,30 @@ bool decodeHex(const String &hex, uint8_t *output, size_t capacity, size_t &leng
   return true;
 }
 
+// One TCP controller owns the protocol while connected; USB diagnostics stay local.
+constexpr uint16_t AGENT_TCP_PORT = 8233;
+WiFiServer agentServer(AGENT_TCP_PORT, 1);
+WiFiClient agentClient;
+Stream *protocolIO = &Serial;
+
 bool sendHex(const uint8_t *bytes, size_t size) {
   static const char digits[] = "0123456789abcdef";
-  // Keep each line below the default USB CDC TX ring-buffer size.
-  char line[139];
+  // USB keeps short lines; TCP batches a complete audio block.
+  char line[2059];
   while (size) {
-    const size_t count = size > 64 ? 64 : size;
+    const size_t count = min(size, agentUsesWiFi ? size_t(1024) : size_t(64));
     memcpy(line, "BOX1 DATA ", 10);
     for (size_t i = 0; i < count; ++i) {
       line[10 + i * 2] = digits[bytes[i] >> 4];
       line[11 + i * 2] = digits[bytes[i] & 15];
     }
     line[10 + count * 2] = '\n';
-    if (!writeFully(Serial, reinterpret_cast<uint8_t *>(line), 11 + count * 2)) {
+    if (!writeFully(*protocolIO, reinterpret_cast<uint8_t *>(line), 11 + count * 2)) {
       return false;
     }
     bytes += count;
     size -= count;
-    delay(1);
+    if (!agentUsesWiFi) delay(1);
   }
   return true;
 }
@@ -549,10 +673,10 @@ void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs) {
   cancelPlayback();
   releaseRecording();
   uint8_t *audio = static_cast<uint8_t *>(ps_malloc(MAX_AUDIO_BYTES));
-  if (!audio) { Serial.println("BOX1 ERR memory"); return; }
+  if (!audio) { protocolIO->println("BOX1 ERR memory"); return; }
   // Keep 256 ms before onset so the first syllable is preserved.
   int16_t *preroll = static_cast<int16_t *>(ps_malloc(4096 * sizeof(int16_t)));
-  if (!preroll) { free(audio); Serial.println("BOX1 ERR memory"); return; }
+  if (!preroll) { free(audio); protocolIO->println("BOX1 ERR memory"); return; }
   size_t ringAt = 0, ringCount = 0, captured = 0;
   SpeechGate gate(threshold, silenceMs * 16);
   const uint32_t startedAt = millis();
@@ -589,7 +713,7 @@ void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs) {
         audio[captured++] = value & 255;
         audio[captured++] = value >> 8;
       }
-      Serial.println("BOX1 EVENT speech_start");
+      protocolIO->println("BOX1 EVENT speech_start");
     }
     updateVolumeMeter(stereo, received / 2, 2, gate.started);
     if (gate.finished) break;
@@ -598,43 +722,62 @@ void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs) {
   free(preroll);
   if (!gate.started && (error == ESP_OK || error == ESP_ERR_TIMEOUT)) {
     free(audio);
-    Serial.println("BOX1 OK bytes=0 audio=pull1 reason=silence");
+    protocolIO->println("BOX1 OK bytes=0 audio=pull1 reason=silence");
   } else if (!gate.started || (!gate.finished && captured < MAX_AUDIO_BYTES)) {
     free(audio);
-    Serial.printf("BOX1 ERR listen_read error=%d\n", static_cast<int>(error));
+    protocolIO->printf("BOX1 ERR listen_read error=%d\n", static_cast<int>(error));
   } else {
     recordBuffer = audio;
     recordSize = captured;
     recordActivity = millis();
-    Serial.printf("BOX1 OK bytes=%u audio=pull1 reason=%s\n",
+    protocolIO->printf("BOX1 OK bytes=%u audio=pull1 reason=%s\n",
                   static_cast<unsigned>(captured), gate.finished ? "silence" : "limit");
   }
 }
 
 void handleCommand(const String &line) {
   if (line == "BOX1 PING") {
-    Serial.printf("BOX1 OK mic=%d speaker=%d rate=16000 audio=pull1 capture=slot32-v3 playback=usbfast-v2 rx=4096 vad=1 upload=checked1 stream=ring1 streamrev=4 sync=1 face=1\n", audioReady, speakerReady);
+    protocolIO->printf("BOX1 OK mic=%d speaker=%d rate=16000 audio=pull1 capture=slot32-v3 playback=usbfast-v2 rx=4096 vad=1 upload=checked1 stream=ring1 streamrev=4 sync=1 face=1 link=1 netchunk=%u netread=%u\n", audioReady, speakerReady,
+                       agentUsesWiFi ? 8192u : 0u, agentUsesWiFi ? 4096u : 0u);
+  } else if (line == "BOX1 LINK" || line.startsWith("BOX1 LINK ")) {
+    if (line == "BOX1 LINK SET USB") requestedWiFi = false;
+    else if (line == "BOX1 LINK SET WIFI") requestedWiFi = true;
+    else if (line.startsWith("BOX1 LINK OPTIONS ")) {
+      int usb, wifi; char extra;
+      if (sscanf(line.c_str(), "BOX1 LINK OPTIONS %d %d %c", &usb, &wifi, &extra) != 2 ||
+          (usb != 0 && usb != 1) || (wifi != 0 && wifi != 1)) {
+        protocolIO->println("BOX1 ERR link_options"); return;
+      }
+      hostHasUSB = usb;
+      hostHasWiFi = wifi;
+    } else if (line != "BOX1 LINK") {
+      protocolIO->println("BOX1 ERR link_command"); return;
+    }
+    protocolIO->printf("BOX1 OK transport=%s requested=%s usb=%d wifi=%d\n",
+                       agentUsesWiFi ? "wifi" : "usb", requestedWiFi ? "wifi" : "usb",
+                       hostHasUSB, hostHasWiFi);
+    drawSettingsBar();
   } else if (line.startsWith("BOX1 LISTEN ")) {
     int threshold; unsigned silenceMs, waitMs; char extra;
     if (!audioReady || sscanf(line.c_str(), "BOX1 LISTEN %d %u %u %c",
                               &threshold, &silenceMs, &waitMs, &extra) != 3 ||
         threshold < 1 || threshold > 32768 || silenceMs < 250 || silenceMs > 5000 ||
         waitMs < 250 || waitMs > 10000) {
-      Serial.println("BOX1 ERR listen_parameters"); return;
+      protocolIO->println("BOX1 ERR listen_parameters"); return;
     }
     listenForSpeech(threshold, silenceMs, waitMs);
   } else if (line.startsWith("BOX1 FACE ")) {
     const String expression = line.substring(10);
     if (expression != "happy" && expression != "sad" && expression != "listening" &&
         expression != "thinking" && expression != "speaking" && expression != "music" && expression != "error") {
-      Serial.println("BOX1 ERR expression"); return;
+      protocolIO->println("BOX1 ERR expression"); return;
     }
     agentExpression = expression;
     drawAgentFace();
-    Serial.println("BOX1 OK");
+    protocolIO->println("BOX1 OK");
   } else if (line.startsWith("BOX1 TEXT ")) {
     const int split = line.indexOf(' ', 10);
-    if (split < 0) { Serial.println("BOX1 ERR text_format"); return; }
+    if (split < 0) { protocolIO->println("BOX1 ERR text_format"); return; }
     const String language = line.substring(10, split);
     DisplayLanguage selected;
     if (language == "en") selected = DisplayLanguage::English;
@@ -642,11 +785,11 @@ void handleCommand(const String &line) {
     else if (language == "zh-TW") selected = DisplayLanguage::TraditionalChinese;
     else if (language == "ja") selected = DisplayLanguage::Japanese;
     else if (language == "ko") selected = DisplayLanguage::Korean;
-    else { Serial.println("BOX1 ERR language"); return; }
+    else { protocolIO->println("BOX1 ERR language"); return; }
     char text[1025];
     size_t length;
     if (!decodeHex(line.substring(split + 1), reinterpret_cast<uint8_t *>(text), 1024, length)) {
-      Serial.println("BOX1 ERR text_hex"); return;
+      protocolIO->println("BOX1 ERR text_hex"); return;
     }
     text[length] = 0;
     remoteDisplay = true;
@@ -655,39 +798,50 @@ void handleCommand(const String &line) {
     lcd.setClipRect(104, 0, 216, 140);
     printLocalizedText(104, 4, text, selected);
     lcd.clearClipRect();
-    Serial.println("BOX1 OK");
+    protocolIO->println("BOX1 OK");
   } else if (line.startsWith("BOX1 SYNC ")) {
     const String token = line.substring(10);
-    if (!token.length() || token.length() > 32) { Serial.println("BOX1 ERR sync_token"); return; }
-    Serial.printf("\nBOX1 OK sync=%s next=%u read=%u failed=%d done=%d\n", token.c_str(),
+    if (!token.length() || token.length() > 32) { protocolIO->println("BOX1 ERR sync_token"); return; }
+    protocolIO->printf("\nBOX1 OK sync=%s next=%u read=%u failed=%d done=%d\n", token.c_str(),
                   static_cast<unsigned>(playReceived), static_cast<unsigned>(streamRead.load()),
                   streamFailed.load(), streamDone.load());
   } else if (line.startsWith("BOX1 RESET ")) {
     const String token = line.substring(11);
-    if (!token.length() || token.length() > 32) { Serial.println("BOX1 ERR reset_token"); return; }
+    if (!token.length() || token.length() > 32) { protocolIO->println("BOX1 ERR reset_token"); return; }
     cancelPlayback(); releaseRecording();
-    Serial.printf("BOX1 OK sync=%s\n", token.c_str());
+    protocolIO->printf("BOX1 OK sync=%s\n", token.c_str());
   } else if (line == "BOX1 CANCEL") {
-    cancelPlayback(); releaseRecording(); Serial.println("BOX1 OK");
+    cancelPlayback(); releaseRecording(); protocolIO->println("BOX1 OK");
   } else if (line.startsWith("BOX1 READ ")) {
     const String value = line.substring(10);
+    const int split = value.indexOf(' ');
+    const String offsetText = split < 0 ? value : value.substring(0, split);
+    size_t requested = 256; // Legacy READ offset remains compatible.
+    bool valid = offsetText.length() > 0;
+    if (split >= 0) {
+      const String countText = value.substring(split + 1);
+      char *end = nullptr;
+      requested = strtoul(countText.c_str(), &end, 10);
+      valid = countText.length() && countText[0] >= '0' && countText[0] <= '9' &&
+              !*end && requested > 0 && requested % 2 == 0 &&
+              requested <= (agentUsesWiFi ? 4096u : 256u);
+    }
     size_t offset = 0;
-    bool valid = value.length() > 0;
-    for (char ch : value) {
+    for (char ch : offsetText) {
       if (ch < '0' || ch > '9' || offset > MAX_AUDIO_BYTES / 10) { valid = false; break; }
       offset = offset * 10 + ch - '0';
       if (offset > MAX_AUDIO_BYTES) { valid = false; break; }
     }
     if (!valid || !recordBuffer || offset >= recordSize || offset % 2) {
-      Serial.println("BOX1 ERR recording_offset"); return;
+      protocolIO->println("BOX1 ERR recording_offset"); return;
     }
     recordActivity = millis();
-    const size_t count = min(static_cast<size_t>(256), recordSize - offset);
+    const size_t count = min(requested, recordSize - offset);
     const uint32_t checksum = esp_rom_crc32_le(0, recordBuffer + offset, count);
     if (!sendHex(recordBuffer + offset, count)) {
-      Serial.println("\nBOX1 ERR usb_write"); return;
+      protocolIO->println("\nBOX1 ERR usb_write"); return;
     }
-    Serial.printf("BOX1 OK offset=%u bytes=%u crc=%08lx\n",
+    protocolIO->printf("BOX1 OK offset=%u bytes=%u crc=%08lx\n",
                   static_cast<unsigned>(offset), static_cast<unsigned>(count),
                   static_cast<unsigned long>(checksum));
   } else if (line.startsWith("BOX1 STREAM ")) {
@@ -695,65 +849,67 @@ void handleCommand(const String &line) {
     char *end = nullptr;
     const unsigned long bytes = strtoul(value.c_str(), &end, 10);
     if (!speakerReady || !value.length() || *end || !bytes || bytes % 2 || bytes > 0x7ffffffeUL) {
-      Serial.println("BOX1 ERR stream_size"); return;
+      protocolIO->println("BOX1 ERR stream_size"); return;
     }
     cancelPlayback();
     releaseRecording();
     playBuffer = static_cast<uint8_t *>(ps_malloc(MAX_AUDIO_BYTES));
-    if (!playBuffer) { Serial.println("BOX1 ERR memory"); return; }
+    if (!playBuffer) { protocolIO->println("BOX1 ERR memory"); return; }
     playExpected = bytes;
     playActivity = millis();
     streamWritten = streamRead = 0;
     streamStop = streamFailed = false;
     streamDone = false;
+    streamUnderruns = streamStallMs = 0;
+    streamPrefillBytes = agentUsesWiFi ? 16000 : 64000;
     streaming = true;
     lastStreamLength = 0;
     if (xTaskCreate(playbackStreamTask, "usb_audio", 4096, nullptr, 2, nullptr) != pdPASS) {
       streamDone = true;
       cancelPlayback();
-      Serial.println("BOX1 ERR stream_task"); return;
+      protocolIO->println("BOX1 ERR stream_task"); return;
     }
-    Serial.printf("BOX1 OK stream=ring1 bytes=%u\n", static_cast<unsigned>(playExpected));
+    protocolIO->printf("BOX1 OK stream=ring1 bytes=%u\n", static_cast<unsigned>(playExpected));
   } else if (line.startsWith("BOX1 PLAY ")) {
     size_t bytes;
     if (!speakerReady || !parseCount(line.substring(10), bytes)) {
-      Serial.println("BOX1 ERR playback_unavailable_or_size"); return;
+      protocolIO->println("BOX1 ERR playback_unavailable_or_size"); return;
     }
     cancelPlayback();
     releaseRecording();
     playBuffer = static_cast<uint8_t *>(ps_malloc(bytes));
-    if (!playBuffer) { Serial.println("BOX1 ERR memory"); return; }
+    if (!playBuffer) { protocolIO->println("BOX1 ERR memory"); return; }
     playExpected = bytes;
     playActivity = millis();
-    Serial.println("BOX1 OK");
+    protocolIO->println("BOX1 OK");
   } else if (line.startsWith("BOX1 CHUNK ")) {
     unsigned offset; unsigned long checksum; int prefix = 0;
     if (sscanf(line.c_str(), "BOX1 CHUNK %u %lx %n", &offset, &checksum, &prefix) != 2 || !prefix) {
-      Serial.println("BOX1 ERR chunk_format"); return;
+      protocolIO->println("BOX1 ERR chunk_format"); return;
     }
-    uint8_t bytes[256]; size_t length;
+    static uint8_t bytes[8192]; size_t length;
     if (!decodeHex(line.substring(prefix), bytes, sizeof(bytes), length) || !length || length % 2) {
-      Serial.println("BOX1 ERR chunk_hex"); return;
+      protocolIO->println("BOX1 ERR chunk_hex"); return;
     }
     if (esp_rom_crc32_le(0, bytes, length) != checksum) {
-      Serial.println("BOX1 ERR chunk_crc"); return;
+      protocolIO->println("BOX1 ERR chunk_crc"); return;
     }
     if (!playBuffer || offset > playExpected || length > playExpected - offset) {
-      Serial.printf("BOX1 ERR chunk_buffer buffer=%d stream=%d offset=%u length=%u received=%u expected=%u\n",
+      protocolIO->printf("BOX1 ERR chunk_buffer buffer=%d stream=%d offset=%u length=%u received=%u expected=%u\n",
                     playBuffer != nullptr, streaming, offset, static_cast<unsigned>(length),
                     static_cast<unsigned>(playReceived), static_cast<unsigned>(playExpected));
       return;
     }
     if (streaming) {
-      if (streamFailed) { Serial.println("BOX1 ERR stream_playback"); return; }
+      if (streamFailed) { protocolIO->println("BOX1 ERR stream_playback"); return; }
       if (offset == playReceived) {
         // Backpressure must never block USB command handling.
         if (!streamDone && playReceived - streamRead.load() + length > MAX_AUDIO_BYTES) {
-          Serial.printf("BOX1 ERR stream_busy next=%u read=%u\n", offset,
+          protocolIO->printf("BOX1 ERR stream_busy next=%u read=%u\n", offset,
                         static_cast<unsigned>(streamRead.load()));
           return;
         }
-        if (streamDone) { Serial.println("BOX1 ERR stream_stopped"); return; }
+        if (streamDone) { protocolIO->println("BOX1 ERR stream_stopped"); return; }
         for (size_t i = 0; i < length; ++i) playBuffer[(offset + i) % MAX_AUDIO_BYTES] = bytes[i];
         memcpy(lastStreamChunk, bytes, length);
         lastStreamOffset = offset;
@@ -762,10 +918,10 @@ void handleCommand(const String &line) {
         streamWritten = playReceived;
       } else if (offset != lastStreamOffset || length != lastStreamLength ||
                  memcmp(bytes, lastStreamChunk, length)) {
-        Serial.println("BOX1 ERR chunk_offset"); return;
+        protocolIO->println("BOX1 ERR chunk_offset"); return;
       }
       playActivity = millis();
-      Serial.printf("BOX1 OK next=%u\n", static_cast<unsigned>(offset + length));
+      protocolIO->printf("BOX1 OK next=%u\n", static_cast<unsigned>(offset + length));
       return;
     }
     // Repeating a committed block is safe; corrupted input never advances it.
@@ -774,16 +930,16 @@ void handleCommand(const String &line) {
       playReceived += length;
     } else if (offset > playReceived || length > playReceived - offset ||
                memcmp(playBuffer + offset, bytes, length) != 0) {
-      Serial.printf("BOX1 ERR chunk_offset next=%u\n", static_cast<unsigned>(playReceived)); return;
+      protocolIO->printf("BOX1 ERR chunk_offset next=%u\n", static_cast<unsigned>(playReceived)); return;
     }
     playActivity = millis();
-    Serial.printf("BOX1 OK next=%u\n", static_cast<unsigned>(offset + length));
+    protocolIO->printf("BOX1 OK next=%u\n", static_cast<unsigned>(offset + length));
   } else if (line.startsWith("BOX1 DATA ")) {
-    if (streaming) { Serial.println("BOX1 ERR stream_requires_chunk"); return; }
+    if (streaming) { protocolIO->println("BOX1 ERR stream_requires_chunk"); return; }
     uint8_t bytes[512]; size_t length;
     if (!playBuffer || !decodeHex(line.substring(10), bytes, sizeof(bytes), length) ||
         playReceived + length > playExpected) {
-      Serial.printf("BOX1 ERR audio_payload buffer=%d hex_chars=%u received=%u expected=%u\n",
+      protocolIO->printf("BOX1 ERR audio_payload buffer=%d hex_chars=%u received=%u expected=%u\n",
                     playBuffer != nullptr, static_cast<unsigned>(line.length() - 10),
                     static_cast<unsigned>(playReceived), static_cast<unsigned>(playExpected));
       cancelPlayback(); return;
@@ -791,16 +947,19 @@ void handleCommand(const String &line) {
     memcpy(playBuffer + playReceived, bytes, length);
     playReceived += length;
     playActivity = millis();
-    Serial.println("BOX1 OK");
+    protocolIO->println("BOX1 OK");
   } else if (line == "BOX1 END") {
     if (!playBuffer || playReceived != playExpected) {
-      cancelPlayback(); Serial.println("BOX1 ERR incomplete_audio"); return;
+      cancelPlayback(); protocolIO->println("BOX1 ERR incomplete_audio"); return;
     }
     if (streaming) {
       while (!streamDone) delay(1);
       const bool ok = !streamFailed;
       cancelPlayback();
-      Serial.println(ok ? "BOX1 OK" : "BOX1 ERR stream_playback");
+      if (ok) protocolIO->printf("BOX1 OK underruns=%lu stalled_ms=%lu\n",
+                                 static_cast<unsigned long>(streamUnderruns.load()),
+                                 static_cast<unsigned long>(streamStallMs.load()));
+      else protocolIO->println("BOX1 ERR stream_playback");
       return;
     }
     digitalWrite(46, HIGH);
@@ -819,16 +978,16 @@ void handleCommand(const String &line) {
     }
     delay(110); // Drain the six 240-frame DMA buffers before muting.
     cancelPlayback();
-    Serial.println(ok ? "BOX1 OK" : "BOX1 ERR i2s_write");
+    protocolIO->println(ok ? "BOX1 OK" : "BOX1 ERR i2s_write");
   } else if (line.startsWith("BOX1 RECORD ")) {
     size_t bytes;
     if (!audioReady || !parseCount(line.substring(12), bytes)) {
-      Serial.println("BOX1 ERR recording_unavailable_or_size"); return;
+      protocolIO->println("BOX1 ERR recording_unavailable_or_size"); return;
     }
     cancelPlayback();
     releaseRecording();
     uint8_t *recording = static_cast<uint8_t *>(ps_malloc(bytes));
-    if (!recording) { Serial.println("BOX1 ERR memory"); return; }
+    if (!recording) { protocolIO->println("BOX1 ERR memory"); return; }
     size_t captured = 0;
     esp_err_t captureError = ESP_OK;
     const uint32_t started = millis();
@@ -852,45 +1011,100 @@ void handleCommand(const String &line) {
       recordBuffer = recording;
       recordSize = captured;
       recordActivity = millis();
-      Serial.printf("BOX1 OK bytes=%u expected=%u partial=%d elapsed_ms=%lu error=%d audio=pull1\n",
+      protocolIO->printf("BOX1 OK bytes=%u expected=%u partial=%d elapsed_ms=%lu error=%d audio=pull1\n",
                     static_cast<unsigned>(captured), static_cast<unsigned>(bytes), captured != bytes,
                     static_cast<unsigned long>(millis() - started), static_cast<int>(captureError));
     } else {
       free(recording);
-      Serial.printf("BOX1 ERR i2s_read captured=0 expected=%u elapsed_ms=%lu error=%d\n",
+      protocolIO->printf("BOX1 ERR i2s_read captured=0 expected=%u elapsed_ms=%lu error=%d\n",
                     static_cast<unsigned>(bytes), static_cast<unsigned long>(millis() - started),
                     static_cast<int>(captureError));
     }
-  } else Serial.println("BOX1 ERR unknown_command");
+  } else protocolIO->println("BOX1 ERR unknown_command");
 }
 
-void pollUSB() {
+void pollAgent() {
   static String line;
   static bool overflow = false;
   static uint32_t lastByte = 0;
+  static bool tcpOwned = false;
+  if (tcpOwned && !agentClient.connected()) {
+    agentClient.stop();
+    cancelPlayback();
+    releaseRecording();
+    line = "";
+    overflow = false;
+    tcpOwned = false;
+    agentUsesWiFi = false;
+    protocolIO = &Serial;
+    // Discard USB commands queued while the network controller owned audio.
+    while (Serial.available()) Serial.read();
+  }
+  if (!tcpOwned && agentServer.hasClient()) {
+    // Do not hand an in-progress USB transaction to a network client.
+    WiFiClient incoming = agentServer.accept();
+    if (playBuffer || recordBuffer || line.length() ||
+        millis() - usbCommandActivity < 1000) {
+      incoming.println("BOX1 ERR controller_busy");
+      incoming.stop();
+    } else {
+      agentClient = incoming;
+      agentClient.setNoDelay(true);
+      protocolIO = &agentClient;
+      tcpOwned = true;
+      agentUsesWiFi = true;
+      requestedWiFi = true;
+      line.reserve(16600);
+      line = "";
+      overflow = false;
+    }
+  }
+  if (tcpOwned) {
+    // Keep the native USB RX queue from replaying competing commands later.
+    for (size_t n = 0; Serial.available() && n < 4096; ++n) Serial.read();
+    if (agentServer.hasClient()) {
+      WiFiClient extra = agentServer.accept();
+      extra.println("BOX1 ERR controller_busy");
+      extra.stop();
+    }
+  }
   if (line.length() && millis() - lastByte > 5000) {
     line = ""; overflow = false;
-    Serial.println("BOX1 ERR command_timeout");
+    protocolIO->println("BOX1 ERR command_timeout");
   }
   // The playback worker owns stream inactivity detection. Never silently free
   // an active ring: the next CHUNK must report a stream failure with context.
   if (playBuffer && !streaming && millis() - playActivity > 15000) cancelPlayback();
   if (recordBuffer && millis() - recordActivity > 30000) releaseRecording();
-  for (size_t budget = 0; Serial.available() && budget < 4096; ++budget) {
-    const char ch = Serial.read();
+  // NetworkClient.available() queries the socket. Amortize that work across
+  // a whole batch instead of repeating it for every byte of a hex audio frame.
+  const size_t budget = agentUsesWiFi ? 17000u : 4096u;
+  uint8_t incoming[512];
+  size_t consumed = 0;
+  while (consumed < budget) {
+    const int available = protocolIO->available();
+    if (available <= 0) break;
+    const size_t count = min(min(size_t(available), sizeof(incoming)), budget - consumed);
+    const int received = agentUsesWiFi ? agentClient.read(incoming, count) :
+                                        Serial.read(incoming, count);
+    if (received <= 0) break;
+    consumed += received;
     lastByte = millis();
-    if (ch == '\r') continue;
-    if (ch == '\n') {
-      if (overflow) Serial.println("BOX1 ERR line_too_long");
-      else if (line.startsWith("BOX1 ")) {
-        usbCommandActivity = millis();
-        handleCommand(line);
-        usbCommandActivity = millis();
+    for (int i = 0; i < received; ++i) {
+      const char ch = incoming[i];
+      if (ch == '\r') continue;
+      if (ch == '\n') {
+        if (overflow) protocolIO->println("BOX1 ERR line_too_long");
+        else if (line.startsWith("BOX1 ")) {
+          usbCommandActivity = millis();
+          handleCommand(line);
+          usbCommandActivity = millis();
+        }
+        line = ""; overflow = false;
+      } else if (!overflow) {
+        if (line.length() >= (agentUsesWiFi ? 16600u : 2200u)) overflow = true;
+        else line += ch;
       }
-      line = ""; overflow = false;
-    } else if (!overflow) {
-      if (line.length() >= 2200) overflow = true;
-      else line += ch;
     }
   }
 }
@@ -957,10 +1171,13 @@ void setup() {
 
   // Draw the volume meter frame
   lcd.drawRect(20, 180, 280, 25, TFT_DARKGREY);
+  setupWiFi();
+  agentServer.begin();
 }
 
 void loop() {
-  pollUSB();
+  pollSettings();
+  pollAgent();
   // Prioritize the next stop-and-wait USB packet. A blocking idle microphone
   // read after every DATA/READ packet adds seconds before playback can start.
   if (playBuffer || (recordBuffer && millis() - recordActivity < 1000) ||
@@ -970,7 +1187,7 @@ void loop() {
   }
   // 1. Handle touch input
   uint16_t x, y;
-  if (!remoteDisplay && lcd.getTouch(&x, &y)) {
+  if (!remoteDisplay && lcd.getTouch(&x, &y) && y < 212) {
     lcd.fillCircle(x, y, 4, TFT_GREEN);
     lcd.setCursor(10, 120);
     lcd.printf("Touch X=%d, Y=%d   ", x, y);

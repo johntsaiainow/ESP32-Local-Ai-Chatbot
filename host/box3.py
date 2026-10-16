@@ -1,4 +1,4 @@
-"""USB client for BOX-3 protocol v1; all speech processing runs on the host."""
+"""USB/TCP client for BOX-3 protocol v1; all speech processing runs on the host."""
 import argparse
 import json
 import os
@@ -12,6 +12,8 @@ import zlib
 import math
 import struct
 import secrets
+import select
+import socket
 
 RATE = 16000
 MAX_BYTES = 320000
@@ -29,7 +31,35 @@ class Box3:
     def __init__(self, port, timeout=30, serial_factory=None):
         if serial_factory is None:
             import serial
-            serial_factory = serial.Serial
+            if port.startswith('socket://'):
+                from serial.urlhandler.protocol_socket import Serial as SocketSerial
+
+                class BufferedSocketSerial(SocketSerial):
+                    def open(self):
+                        super().open()
+                        self._socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+                    def read_available(self):
+                        # pyserial socket.in_waiting reports readiness (0/1),
+                        # not queued bytes. recv drains a batch without waiting
+                        # for a 4096-byte serial read to fill or time out.
+                        ready, _, _ = select.select([self._socket], [], [], self.timeout)
+                        if not ready:
+                            return b''
+                        try:
+                            data = self._socket.recv(4096)
+                        except BlockingIOError:
+                            return b''
+                        if not data:
+                            raise serial.SerialException('BOX-3 TCP connection closed')
+                        return data
+
+                def serial_factory(**kwargs):
+                    kwargs.pop('port', None)
+                    kwargs.pop('exclusive', None)
+                    return BufferedSocketSerial(port=None, **kwargs)
+            else:
+                serial_factory = serial.Serial
         self.serial = serial_factory(port=None, baudrate=115200, timeout=0.2,
                                      write_timeout=5, exclusive=True)
         self.serial.dtr = False
@@ -92,7 +122,9 @@ class Box3:
         while time.monotonic() < deadline:
             # Wait for one byte, then consume available data without adding a
             # full serial timeout to every stop-and-wait audio packet.
-            chunk = self.serial.read(max(1, min(4096, self.serial.in_waiting)))
+            reader = getattr(self.serial, 'read_available', None)
+            chunk = reader() if reader is not None else self.serial.read(
+                max(1, min(4096, self.serial.in_waiting)))
             self.pending.extend(chunk)
             if len(self.pending) > 65536:
                 raise RuntimeError('Serial input exceeded the protocol buffer limit')
@@ -192,10 +224,12 @@ class Box3:
         try:
             while len(data) < captured:
                 offset = len(data)
-                count = min(256, captured - offset)
+                read_size = self.network_block_size('netread', 256)
+                count = min(read_size, captured - offset)
                 for attempt in range(3):
                     try:
-                        block, status = self.command(f'READ {offset}', max_data=count)
+                        request = f'READ {offset}' + (f' {count}' if read_size > 256 else '')
+                        block, status = self.command(request, max_data=count)
                         fields = self.reply_fields(status)
                         checksum = f'{zlib.crc32(block):08x}'
                         if (len(block) != count or fields.get('offset') != str(offset) or
@@ -221,6 +255,17 @@ class Box3:
                     self.command('CANCEL')
                 except (RuntimeError, TimeoutError, OSError):
                     pass  # The device also expires unused recordings.
+
+    def network_block_size(self, capability, default):
+        # Negotiate with firmware; legacy firmware and USB retain old limits.
+        if not self.serial.port.startswith('socket://'):
+            return default
+        try:
+            size = int(self.reply_fields(self.status).get(capability, default))
+        except ValueError:
+            return default
+        limit = 8192 if capability == 'netchunk' else 4096
+        return size if default <= size <= limit and size % 2 == 0 else default
 
     @staticmethod
     def reply_fields(status):
@@ -264,6 +309,8 @@ class Box3:
                     checked = self.reply_fields(self.status).get('upload') == 'checked1'
                     resilient = streaming and self.reply_fields(self.status).get('sync') == '1'
                     block_size = (128 if resilient else 256) if checked else 64
+                    if checked:
+                        block_size = self.network_block_size('netchunk', block_size)
                     for offset in range(0, len(pcm), block_size):
                         block = pcm[offset:offset + block_size]
                         if checked:
@@ -311,7 +358,11 @@ class Box3:
                             reported = percent
                     if progress:
                         progress('Playing on BOX-3 speaker...')
-                    self.command('END')
+                    _, end_ack = self.command('END')
+                    end_fields = self.reply_fields(end_ack)
+                    if progress and 'underruns' in end_fields:
+                        progress(f"Audio supply: underruns={end_fields['underruns']}, "
+                                 f"stalled_ms={end_fields.get('stalled_ms', '?')}")
                     if progress:
                         progress('Playback complete')
                 except Exception:
@@ -324,6 +375,64 @@ class Box3:
                     except Exception:
                         pass
                     raise
+
+
+class Box3Connection:
+    """Keep one controller open and switch it at completed command boundaries."""
+    def __init__(self, endpoints, preferred, factory=Box3):
+        self.endpoints = dict(endpoints)
+        self.factory = factory
+        self.active = preferred
+        self.device = None
+        self._open(preferred)
+
+    def __getattr__(self, name):
+        return getattr(self.device, name)
+
+    def _open(self, transport):
+        device = self.factory(self.endpoints[transport])
+        try:
+            supports_link = Box3.reply_fields(device.status).get('link') == '1'
+            if len(self.endpoints) > 1 and not supports_link:
+                raise RuntimeError('Transport switching requires link=1 firmware; flash the updated firmware')
+            if supports_link:
+                device.command('LINK SET ' + transport.upper())
+                device.command(f'LINK OPTIONS {int("usb" in self.endpoints)} {int("wifi" in self.endpoints)}')
+        except Exception:
+            device.close()
+            raise
+        self.device = device
+        self.active = transport
+        print(f'Transport: {transport.upper()} ({self.endpoints[transport]})', flush=True)
+
+    def switch(self, transport):
+        transport = transport.lower()
+        if transport not in self.endpoints:
+            raise ValueError(f'{transport.upper()} is not configured; provide --port and --host to enable switching')
+        if transport == self.active:
+            return
+        previous = self.active
+        self.device.close()
+        # Let firmware release TCP ownership / expire its USB handover guard.
+        time.sleep(1.1)
+        try:
+            self._open(transport)
+        except Exception as exc:
+            time.sleep(1.1)
+            self._open(previous)
+            raise RuntimeError(f'Cannot switch to {transport.upper()}; restored {previous.upper()}: {exc}') from exc
+
+    def poll_transport(self):
+        if Box3.reply_fields(self.device.status).get('link') != '1':
+            return
+        _, reply = self.device.command('LINK')
+        requested = Box3.reply_fields(reply).get('requested')
+        if requested in self.endpoints and requested != self.active:
+            self.switch(requested)
+
+    def close(self):
+        if self.device is not None:
+            self.device.close()
 
 
 def speech_command(variable, values):

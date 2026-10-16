@@ -2,7 +2,7 @@
 
 **An ESP32-S3-BOX-3 voice and display terminal for a locally hosted AI coding agent.**
 
-Turn an ESP32-S3-BOX-3 into a compact conversational interface with multilingual text, expressive robot faces, microphone input, speaker output, and a USB connection to a Linux or macOS host. Speech recognition and synthesis run on the host rather than on the ESP32.
+Turn an ESP32-S3-BOX-3 into a compact conversational interface with multilingual text, expressive robot faces, microphone input, speaker output, and USB or Wi-Fi connectivity to a Linux or macOS host. Speech recognition and synthesis run on the host rather than on the ESP32.
 
 > **Architecture note:** “Local AI” refers to the host-side voice pipeline and agent integration. The ESP32 handles display, audio capture/playback, and transport; it does not run the language model itself. The Pi agent's inference backend depends on your Pi configuration and may be local or remote.
 
@@ -12,6 +12,7 @@ Turn an ESP32-S3-BOX-3 into a compact conversational interface with multilingual
 - **Multilingual display:** English, Simplified Chinese, Traditional Chinese, Japanese, and Korean using bundled 16-pixel LovyanGFX efonts.
 - **Emoji and robot avatar:** a supported subset of colorful inline icons and static expressions for listening, thinking, speaking, music, and error states.
 - **Native USB bridge:** display text, record microphone audio, and play host-generated PCM audio.
+- **WiFi Manager:** saved Wi-Fi credentials, automatic setup hotspot on startup connection failure, and an on-screen Settings button.
 - **Offline speech processing:** faster-whisper for speech-to-text, OpenCC for Traditional Chinese conversion, and Piper for text-to-speech.
 - **Pi coding-agent integration:** optional Pi extension tools and a standalone conversational voice agent.
 - **Local music playback:** decode files from a local music directory with mpv and stream them to the BOX-3 speaker.
@@ -86,6 +87,76 @@ pio device monitor --baud 115200
 ```
 
 **Close the serial monitor before starting the host bridge.** Only one application should own the USB serial port at a time.
+
+### Wi-Fi setup / Setting Mode
+
+Tap **Settings** at the bottom right of the touchscreen to enter Setting Mode.
+Connect a phone or computer to the **BOX3-Setup-XXXX** hotspot shown on the
+display (password: **box3setup**), then open **http://192.168.4.1** if the
+configuration page does not appear automatically. Select your Wi-Fi network,
+enter its password, and save. Credentials are stored on the device and reused
+after restart; no source-code credentials are required.
+
+At startup the device tries the saved network for 15 seconds before opening
+the setup hotspot. Successful configuration closes the portal. Tap **Exit**
+to close it manually; it also times out after 3 minutes. Settings can reopen
+the portal without erasing the saved network. The footer shows the station IP
+when connected, or the setup hotspot and password while configuring.
+
+The portal uses [WiFiManager](https://github.com/tzapu/WiFiManager).
+Settings input and portal processing may be delayed during synchronous
+recording/playback commands or a Wi-Fi connection attempt.
+
+### Connect Pi Coding Agent over Wi-Fi
+
+Flash the updated firmware first. Connect BOX-3 and the computer running Pi CLI
+to the same LAN, then use the BOX-3 IP shown in the display footer:
+
+```bash
+host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --language auto
+```
+
+Replace the example IP with your device's IP. The host connects to BOX-3 TCP
+port **8233**; the existing speech recognition, Pi CLI conversation session,
+reply display, speech synthesis, and music playback work over this connection.
+The computer still needs the host speech dependencies, voice models, and Pi CLI
+setup described below. BOX-3 only needs USB power during Wi-Fi operation.
+
+Alternatively, set `BOX3_HOST=192.168.1.50`. Explicit `--host` or `--port`
+overrides environment defaults; `BOX3_HOST` takes precedence over `BOX3_PORT`.
+Use `--port /dev/ttyACM0` to select USB explicitly. Diagnostic commands also
+accept `--port socket://192.168.1.50:8233`, for example:
+
+```bash
+host/.venv/bin/python host/box3.py --port socket://192.168.1.50:8233 status
+host/.venv/bin/python host/box3.py --port socket://192.168.1.50:8233 speaker-test
+```
+
+To enable switching during the same Pi conversation, supply both endpoints:
+
+```bash
+host/.venv/bin/python host/voice_agent.py --port /dev/ttyACM0 --host 192.168.1.50 --transport wifi
+```
+
+The display footer shows **Via: USB** or **Via: WiFi**, independently of Wi-Fi
+network connection status. When both endpoints are configured and Wi-Fi is
+connected, tap **Switch** beside Settings. A pending indicator remains until
+the host switches at the next completed conversation/recording/playback boundary.
+You can also type `/transport usb`, `/transport wifi`, or `/transport status` in
+the host terminal. Only the selected transport is opened at a time. The Pi session
+is preserved, and a failed switch attempts to restore the previous connection.
+Both endpoints must refer to the same BOX-3. Switching requires updated firmware
+advertising `link=1`; a single endpoint remains compatible with older firmware.
+An endpoint being configured does not guarantee that its cable/network is reachable.
+With no `--transport`, an explicit `--host` selects Wi-Fi, an explicit `--port`
+selects that port, and environment defaults prefer `BOX3_HOST` over `BOX3_PORT`.
+
+One TCP controller owns the device while connected; competing TCP clients are
+rejected and USB commands are discarded during that connection. Disconnecting
+releases audio buffers and restores USB control. If a connection fails, restart
+the host command after connectivity returns. The TCP protocol has no authentication
+or encryption and is intended for a trusted local network; do not expose port
+8233 to the internet.
 
 ### 2. Set up the host USB bridge
 

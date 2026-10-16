@@ -1,4 +1,48 @@
-# USB bridge for the Pi coding-agent CLI
+# USB / Wi-Fi bridge for the Pi coding-agent CLI
+
+For Wi-Fi operation, flash the current firmware, configure Wi-Fi through the
+BOX-3 **Settings** touchscreen button, and put the device and Pi CLI computer
+on the same local network. Use the device IP shown on the display:
+
+```bash
+host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --language auto
+# Or: export BOX3_HOST=192.168.1.50
+host/.venv/bin/python host/box3.py --port socket://192.168.1.50:8233 status
+```
+
+TCP port 8233 carries the same BOX1 commands and audio as USB, so the speech
+models, Pi CLI, and voice synthesis remain on the host. The host initiates the
+connection to BOX-3; no inbound Pi host listener is required. Supply USB power
+to BOX-3 without requiring a USB data connection. Use `--port /dev/ttyACM0`
+to explicitly choose USB even when `BOX3_HOST` is set.
+
+To enable switching during the same Pi conversation, supply both endpoints:
+
+```bash
+host/.venv/bin/python host/voice_agent.py --port /dev/ttyACM0 --host 192.168.1.50 --transport wifi
+```
+
+The display footer shows **Via: USB** or **Via: WiFi**, independently of Wi-Fi
+network connection status. When both endpoints are configured and Wi-Fi is
+connected, tap **Switch** beside Settings. A pending indicator remains until
+the host switches at the next completed conversation/recording/playback boundary.
+You can also type `/transport usb`, `/transport wifi`, or `/transport status` in
+the host terminal. Only the selected transport is opened at a time. The Pi session
+is preserved, and a failed switch attempts to restore the previous connection.
+Both endpoints must refer to the same BOX-3. Switching requires updated firmware
+advertising `link=1`; a single endpoint remains compatible with older firmware.
+An endpoint being configured does not guarantee that its cable/network is reachable.
+With no `--transport`, an explicit `--host` selects Wi-Fi, an explicit `--port`
+selects that port, and environment defaults prefer `BOX3_HOST` over `BOX3_PORT`.
+
+Only one controller can own the audio buffers. While a TCP client is connected,
+USB commands are discarded and additional TCP clients are rejected. Closing the
+connection releases device buffers and returns control to USB. Restart the voice
+agent after a dropped connection. TCP is unencrypted and unauthenticated: use a
+trusted LAN and do not forward port 8233 to the internet.
+
+The USB setup below and all speech/model installation steps still apply.
+
 
 ## Device and host setup
 
@@ -382,3 +426,36 @@ for model and CPU inference details.
 Mixed-speech smoke test generated `/tmp/box3-bilingual-reply.wav` from Chinese,
 English, and Chinese runs using the installed voices. The 4.11-second WAV took
 about 6 seconds to prepare on this host. Actual timings depend on text and CPU.
+
+
+### Wi-Fi audio latency
+
+Update both firmware and `host/box3.py` for the optimized TCP transport. The
+host reads TCP replies in batches with TCP_NODELAY, and firmware advertises
+`netchunk=8192 netread=4096` over Wi-Fi to negotiate larger checked playback
+blocks and `READ offset count` recording downloads. USB retains its existing
+block sizes; firmware also accepts legacy `READ offset` requests.
+Wi-Fi playback starts after 500 ms of audio is buffered (USB retains a two-second
+prefill), and ESP32 Wi-Fi power saving is disabled during operation. CRC checks,
+retry handling, and stream backpressure remain enabled. These changes reduce
+transport overhead; speech recognition, Pi response generation, and synthesis
+still contribute to total conversational latency.
+
+For continuous Wi-Fi playback, the host now sends up to 8192 PCM bytes per
+acknowledgement (256 ms of audio), rather than acknowledging every 32 ms.
+The half-second prefill absorbs ordinary Wi-Fi jitter. At completion, diagnostics
+print `Audio supply: underruns=N, stalled_ms=M`. Nonzero values mean the playback
+worker ran out of queued audio; these measure buffer starvation, not STT/Pi/TTS
+time. Update firmware and host together to negotiate these sizes. For an isolated
+transport/speaker check without speech models or Pi, run:
+
+```bash
+host/.venv/bin/python host/box3.py --port socket://192.168.1.50:8233 speaker-test
+```
+
+Use the device's actual IP and close the voice agent before this diagnostic.
+
+The device also reads incoming commands in 512-byte batches and polls Settings
+touch input at 50 Hz. This avoids a socket availability query and an I2C touch
+poll for every received byte/loop, while preserving fragmented commands, USB
+framing, frame limits, and the existing 500 ms Wi-Fi prefill.
