@@ -19,6 +19,24 @@ processing. Both modes provide microphone capture, speaker playback,
 multilingual text, and Osiris color emoji expressions. The language model runs
 on the provider or configured host backend, rather than on the ESP32 itself.
 
+## Supported hardware
+
+| ESP32-S3-BOX-3 | LiChuang 实战派 ESP32-S3 | M5Stack CoreS3 |
+| --- | --- | --- |
+| [<img src="docs/media/boards/box3.jpg" width="220" alt="ESP32-S3-BOX-3 kit">](docs/boards.md#espressif-esp32-s3-box-3) | [<img src="docs/media/boards/lichuang.png" width="220" alt="LiChuang 实战派 ESP32-S3 display board">](docs/boards.md#lichuang-实战派-esp32-s3) | [<img src="docs/media/boards/cores3.jpg" width="220" alt="M5Stack CoreS3 SE product photo">](docs/boards.md#m5stack-cores3) |
+| `esp32s3box3` | `lichuang_s3` | `cores3` — photo shows SE variant; see note below |
+
+| AtomS3R + Atomic Echo Base | CrowPanel 7″ + external INMP441 |
+| --- | --- |
+| [<img src="docs/media/boards/atoms3r.jpg" width="260" alt="AtomS3R with Atomic Echo Base">](docs/boards.md#atoms3r--atomic-echo-base) | [<img src="docs/media/boards/crowpanel7.jpg" width="260" alt="Elecrow CrowPanel 7-inch display">](docs/crowpanel7.md) |
+| `atoms3r_echo` — Echo Base required | `crowpanel7_inmp441` — microphone not shown |
+
+Product photos illustrate the hardware; their screen contents are not Osiris UI.
+The supplied CoreS3 photo is labeled **CoreS3 SE**; the documented target is
+CoreS3, and this photo does not establish SE compatibility. See the
+[board guide](docs/boards.md) for exact models and validation limits, and the
+[CrowPanel guide](docs/crowpanel7.md) for required microphone wiring.
+
 ## Features
 
 - **ESP32-S3-BOX-3 interface:** built-in display, microphone, speaker, and audio-level meter.

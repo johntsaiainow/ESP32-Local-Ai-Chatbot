@@ -1,5 +1,10 @@
 # USB / Wi-Fi bridge for the Pi coding-agent CLI
 
+[<img src="../docs/media/boards/box3.jpg" width="260" alt="ESP32-S3-BOX-3 kit">](../docs/boards.md)
+
+The host bridge also supports the other Osiris board targets. See the
+[five-board photo guide, environments and required accessories](../docs/boards.md#hardware-photos).
+
 For **standalone operation without Python**, use the firmware's Settings → Setup
 page to select `openai` or `gemini` and save API/model settings. See the
 [root README](../README.md#standalone-openai--gemini-voice--no-python-host).

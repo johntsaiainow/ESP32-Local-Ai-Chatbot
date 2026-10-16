@@ -21,6 +21,47 @@ has been flashed or physically tested during this port.
 The original AtomS3, AtomS3 Lite, Atomic SPK Base, Atom Echo, Core2 and generic
 ESP32-S3 boards are different hardware and must not use these images.
 
+## Hardware photos
+
+These product photos were supplied by the project maintainer. Displayed product
+screens are illustrative, not screenshots of Osiris. Select firmware using the
+exact board model and wiring above, rather than appearance alone.
+
+### Espressif ESP32-S3-BOX-3
+
+<img src="media/boards/box3.jpg" width="400" alt="ESP32-S3-BOX-3 kit and accessories">
+
+Environment: `esp32s3box3`. The photo shows the BOX-3 kit and accessories.
+
+### LiChuang 实战派 ESP32-S3
+
+<img src="media/boards/lichuang.png" width="400" alt="LiChuang 实战派 ESP32-S3 display board">
+
+Environment: `lichuang_s3`. Use the documented SZPI ESP32-S3 hardware revision.
+
+### M5Stack CoreS3
+
+<img src="media/boards/cores3.jpg" width="340" alt="M5Stack CoreS3 SE product photo">
+
+Environment: `cores3`. **The supplied photo is labeled CoreS3 SE.** The existing
+port targets CoreS3; SE compatibility has not been established by this photo or
+by a hardware validation in this project.
+
+### AtomS3R + Atomic Echo Base
+
+<img src="media/boards/atoms3r.jpg" width="400" alt="AtomS3R AI Chatbot kit with Atomic Echo Base">
+
+Environment: `atoms3r_echo`. The photo includes the required **Atomic Echo Base**
+for microphone and speaker audio; AtomS3R alone is not the supported voice setup.
+
+### CrowPanel 7-inch + external INMP441
+
+<img src="media/boards/crowpanel7.jpg" width="440" alt="Elecrow CrowPanel 7-inch display without external microphone">
+
+Environment: `crowpanel7_inmp441`. The picture shows the display, without the
+required external **INMP441** microphone. This target uses the basic DIS08070H;
+see the [microphone wiring and model details](crowpanel7.md).
+
 ## Build and flash
 
 Choose the environment matching the exact product, for example:

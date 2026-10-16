@@ -1,5 +1,10 @@
 # CrowPanel 7-inch + INMP441
 
+<img src="media/boards/crowpanel7.jpg" width="480" alt="Elecrow CrowPanel 7-inch display">
+
+*Product photo supplied by the project maintainer. The external INMP441 is not
+shown; the dashboard on the display is product imagery, not the Osiris UI.*
+
 Environment: `crowpanel7_inmp441`.
 
 This experimental Osiris port targets the **basic Elecrow DIS08070H** with
