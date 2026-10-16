@@ -469,15 +469,18 @@ Spoken requests now require **Osiris** by default over USB or Wi-Fi:
 - Say **“Osiris!”**, wait for **Awake!** on the display, then speak one request
   within **15 seconds**.
 
-After one request, the agent returns to waiting for the wake phrase. Unrelated
-speech is ignored while waiting, and a standalone wake expires if no request
-arrives. Keyboard prompts and `/transport` commands do not need a wake phrase.
+After each completed answer, the agent stays awake for **30 seconds** so you
+can ask a follow-up without repeating “Osiris!”. Each completed reply starts a
+fresh 30-second window. If the window expires, the sleeping emoji returns and
+the wake phrase is required again. The standalone wake still allows 15 seconds
+for the first request. Unrelated speech is ignored while asleep. Keyboard prompts and `/transport` commands do not need a wake phrase.
 The spelling is **Osiris**; matching ignores case and does not require the
 exclamation mark.
 
 ```bash
 host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --language auto
-# Optional: change timeout, keyword, or disable wake gating
+# Optional: change initial/follow-up timeouts, keyword, or disable wake gating
+host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --followup-timeout 30
 host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --wake-timeout 20
 host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --wake-word 'Hey Osiris'
 host/.venv/bin/python host/voice_agent.py --host 192.168.1.50 --no-wake-word

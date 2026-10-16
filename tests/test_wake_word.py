@@ -47,6 +47,26 @@ class WakeWordTests(unittest.TestCase):
         self.now += 2
         self.assertEqual(self.gate.accept('hello'), 'hello')
 
+    def test_completed_reply_opens_thirty_second_followup(self):
+        self.gate.accept('Osiris, hello')
+        self.now += 180  # Pi processing/playback must not consume the new window.
+        self.gate.arm_followup()
+        self.assertFalse(self.gate.waiting)
+        self.now += 29
+        self.assertEqual(self.gate.accept('And tomorrow?'), 'And tomorrow?')
+        self.gate.arm_followup()
+        self.now += 30
+        self.assertIsNone(self.gate.accept('Too late'))
+        self.assertTrue(self.gate.waiting)
+
+    def test_followup_ui_displays_thirty_seconds_and_listening(self):
+        self.gate.arm_followup()
+        box = Mock()
+        with patch('sys.stdout', io.StringIO()):
+            show_wake_state(box, self.gate)
+        self.assertIn('30 seconds', box.display.call_args.args[0])
+        box.expression.assert_called_with('listening')
+
     def test_keyword_must_be_a_whole_word(self):
         for text in ('xOsiris hello', 'Osiris123 hello', 'Osiriss hello', 'Orsiris hello'):
             with self.subTest(text=text):

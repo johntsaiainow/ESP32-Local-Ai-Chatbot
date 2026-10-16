@@ -20,18 +20,27 @@ from offline_speech import create_recognizer, render_music, synthesize
 
 class WakeWordGate:
     """Gate recognized speech; a standalone wake phrase arms one next request."""
-    def __init__(self, keyword='Osiris', timeout=15, clock=time.monotonic):
+    def __init__(self, keyword='Osiris', timeout=15, clock=time.monotonic, followup_timeout=30):
         self.keyword = keyword.strip().strip('!！.。 ').strip()
         if not self.keyword:
             raise ValueError('Wake word must contain text')
         self.pattern = re.compile(r'(?<![A-Za-z0-9_])' + re.escape(self.keyword) +
                                   r'(?![A-Za-z0-9_])', re.IGNORECASE)
         self.timeout = timeout
+        self.followup_timeout = followup_timeout
         self.clock = clock
         self.reset()
 
     def reset(self):
         self.deadline = None
+
+    def arm_followup(self):
+        """Start a fresh listening window after the response finishes playing."""
+        self.deadline = self.clock() + self.followup_timeout
+
+    @property
+    def remaining(self):
+        return 0 if self.waiting else max(0, self.deadline - self.clock())
 
     @property
     def waiting(self):
@@ -60,7 +69,7 @@ class WakeWordGate:
 def show_wake_state(box, gate):
     waiting = gate.waiting
     message = (f'Say "{gate.keyword}!" to wake me.\nOr say wake word + request.' if waiting else
-               f'Awake! Speak your request.\nWaiting up to {gate.timeout:g} seconds.')
+               f'Awake! Speak your request.\nWaiting up to {gate.remaining:.0f} seconds.')
     box.expression('sleeping' if waiting else 'listening')
     box.display(message, 'en')
     print(message.replace('\n', ' '), flush=True)
@@ -342,6 +351,8 @@ def main():
     parser.add_argument('--no-wake-word', action='store_true', help='Send spoken requests without waking first')
     parser.add_argument('--wake-timeout', type=float, default=15,
                         help='Seconds to accept a request after a standalone wake phrase (default: 15)')
+    parser.add_argument('--followup-timeout', type=float, default=30,
+                        help='Stay awake after each completed reply (seconds, default: 30)')
     parser.add_argument('--pi-no-extensions', action='store_true',
                         help='Disable Pi extension discovery for troubleshooting')
     parser.add_argument('--music-dir', type=Path, default=Path('~/Music').expanduser(),
@@ -368,9 +379,11 @@ def main():
         parser.error('Recording length must be 0.1..10 seconds')
     if not 1 <= args.wake_timeout <= 120:
         parser.error('Wake timeout must be 1..120 seconds')
+    if not 1 <= args.followup_timeout <= 120:
+        parser.error('Follow-up timeout must be 1..120 seconds')
     try:
         wake_gate = None if args.no_wake_word or args.keyboard_only else WakeWordGate(
-            args.wake_word, args.wake_timeout)
+            args.wake_word, args.wake_timeout, followup_timeout=args.followup_timeout)
     except ValueError as exc:
         parser.error(str(exc))
     wake_ui = None
@@ -439,6 +452,7 @@ def main():
                     except (ValueError, RuntimeError) as exc:
                         print('Transport switch:', exc, file=sys.stderr)
                     continue
+                response_completed = False
                 try:
                     if text.startswith('/music '):
                         source = Path(text[7:].strip()).expanduser()
@@ -458,6 +472,7 @@ def main():
                         else:
                             reply = ask_pi(text, session, no_extensions=args.pi_no_extensions)
                             speak_reply(box, reply, temp)
+                    response_completed = True
                 except (Exception, KeyboardInterrupt) as exc:
                     if isinstance(exc, KeyboardInterrupt):
                         raise
@@ -465,15 +480,18 @@ def main():
                     box.expression('error')
                     box.display('Request failed \u274C\nSee host terminal.', 'en')
                 finally:
-                    if wake_gate is not None:
-                        wake_gate.reset()
-                        wake_ui = None
                     vad.reset()
                     listening_announced = False
                     # Discard the first post-playback batch to reduce stale DMA
                     # audio triggering the next utterance. No echo cancellation.
                     if recognizer is not None and getattr(box, 'synchronized', True):
                         box.capture(0.1)
+                    if wake_gate is not None:
+                        if response_completed:
+                            wake_gate.arm_followup()
+                        else:
+                            wake_gate.reset()
+                        wake_ui = None
     finally:
         box.close()
 
