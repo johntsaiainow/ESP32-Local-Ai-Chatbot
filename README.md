@@ -28,6 +28,29 @@ processing. Both modes provide microphone capture, speaker playback,
 multilingual text, and Osiris color emoji expressions. The language model runs
 on the provider or configured host backend, rather than on the ESP32 itself.
 
+## Why I built Osiris
+
+The main reason is freedom.
+
+I want to decide how the firmware works, how the software evolves, where my data
+goes, and which AI services I use. I want to connect to cloud services when they
+suit my needs, run components locally when practical, and replace individual
+parts without redesigning the entire system around a provider's platform.
+
+Xiaozhi has its own design and ecosystem. I chose to build Osiris independently
+because I wanted room to experiment with the architecture myself: from device
+communication and the display to speech processing, Coding Agent integration,
+mixed Chinese/English conversations, music playback, and hardware control.
+
+Running a server at home is only one part of that freedom. I also want to
+understand which external services it calls and retain control over those
+choices. Osiris supports local speech processing and configurable backends;
+using a cloud model still sends data to the selected provider.
+
+Building independently takes more time and means solving more problems myself.
+For me, understanding, modifying, and controlling the system is worth that effort.
+Osiris should grow in the direction its users and developers choose.
+
 ## Osiris on BOX-3
 
 Real-device photos show the large color emoji avatar beside the conversation,
