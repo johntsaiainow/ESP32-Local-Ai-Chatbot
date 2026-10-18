@@ -318,11 +318,19 @@ def speak_reply(box, text, temp, agent_name='Pi'):
 
 def music_query(text):
     patterns = (r'^(?:\u6211\u60F3\u807D|\u6211\u8981\u807D|\u6211\u60F3\u8981\u807D|\u8ACB\u64AD\u653E|\u64AD\u653E|\u653E\u4E00\u9996|\u653E\u9996)\s*(.+)$',
-                r'^(?:play music|play song|play)\s+(.+)$')
+                r'^(?:(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?'
+                r'(?:play|put\s+on|listen\s+to)|'
+                r'(?:i\s+(?:would\s+like|want|like)|i[\'\u2019]d\s+like)'
+                r'\s+to\s+(?:listen\s+to|hear))\s+(.+)$')
     for pattern in patterns:
         match = re.match(pattern, text.strip(), re.IGNORECASE)
         if match:
-            return match.group(1).strip(' \u300C\u300D\u300A\u300B\"\'\u3002.!\uFF01?\uFF1F')
+            query = match.group(1).strip()
+            query = re.sub(r'^(?:the\s+)?(?:song|track|music)(?:\s+(?:called|named))?\s+',
+                           '', query, flags=re.IGNORECASE)
+            query = re.sub(r'[,\s]+please[.!?]*$', '', query, flags=re.IGNORECASE)
+            query = query.strip(' \u300C\u300D\u300A\u300B\"\'\u3002.!\uFF01?\uFF1F')
+            return query or None
     return None
 
 

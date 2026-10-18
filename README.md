@@ -28,6 +28,19 @@ processing. Both modes provide microphone capture, speaker playback,
 multilingual text, and Osiris color emoji expressions. The language model runs
 on the provider or configured host backend, rather than on the ESP32 itself.
 
+## Osiris on BOX-3
+
+Real-device photos show the large color emoji avatar beside the conversation,
+with the microphone level, active connection, and Settings control below.
+
+| Waiting for the wake phrase | Understanding your request | Playing local music |
+| --- | --- | --- |
+| [<img src="docs/media/box3/osiris-sleeping.jpg" width="280" alt="Osiris on BOX-3 showing a sleeping emoji and the wake-phrase instructions">](docs/media/box3/osiris-sleeping.jpg) | [<img src="docs/media/box3/osiris-thinking.jpg" width="280" alt="Osiris on BOX-3 showing a thinking emoji beside the English request to listen to Bohemian Rhapsody">](docs/media/box3/osiris-thinking.jpg) | [<img src="docs/media/box3/osiris-music.jpg" width="280" alt="Osiris on BOX-3 showing a sunglasses emoji and the Bohemian Rhapsody track title during music playback">](docs/media/box3/osiris-music.jpg) |
+| Say **“Osiris!”**, or combine the wake phrase with a request. | Recognized speech stays visible while the agent handles the request. | The music state displays the selected local track while audio streams to the speaker. |
+
+Click a photo to view it at full size. These photos show BOX-3 operation over USB;
+they do not establish hardware validation for the other board targets.
+
 ## Supported hardware
 
 | ESP32-S3-BOX-3 | LiChuang 实战派 ESP32-S3 | M5Stack CoreS3 |
@@ -55,12 +68,12 @@ CoreS3, and this photo does not establish SE compatibility. See the
 - **USB or Wi-Fi transport:** display text, capture microphone audio, and play host-generated PCM audio; show the active transport and switch without losing the Pi session.
 - **Configurable wake phrase:** choose your phrase in Settings (default “Osiris”), with a 15-second initial request window and 30-second follow-up window after each reply.
 - **WiFi Manager:** saved Wi-Fi credentials, automatic setup hotspot on startup connection failure, and an on-screen Settings button.
-- **Offline speech processing:** faster-whisper for speech-to-text, OpenCC for Traditional Chinese conversion, and Piper for text-to-speech.
+- **Offline speech processing:** multilingual faster-whisper for Chinese/English and mixed speech, OpenCC for Traditional Chinese conversion, and Piper voice switching for mixed Chinese/English replies.
 - **Standalone cloud voice:** configure OpenAI or Gemini on the device; record, transcribe, chat, and speak without a Python host.
 - **OpenClaw integration:** connect the ESP32 directly to your Gateway over Wi-Fi, or use host-side local speech. See [setup and connection options](docs/openclaw.md).
 - **Host-assisted providers:** Pi coding agent by default, with optional OpenAI/Gemini/OpenClaw text adapters in the host script.
 - **Pi coding-agent integration:** optional Pi extension tools and a standalone conversational voice agent.
-- **Local music playback:** decode files from a local music directory with mpv and stream them to the BOX-3 speaker.
+- **Local music playback:** request songs in Chinese or natural English, decode matching local files with mpv, and stream them to the BOX-3 speaker.
 - **Lower voice latency:** streamed model text, sentence speech queues, PCM playback during download, persistent Pi RPC, startup Piper warmup, and per-stage timing logs. See [latency settings and measurement](docs/voice-latency.md).
 - **Robust audio transport:** offset and CRC32 validation, retries, synchronization, and PSRAM-buffered continuous playback on compatible firmware.
 - **Linux-first workflow:** PlatformIO, Python virtual environments, and terminal-based diagnostics.
@@ -209,7 +222,12 @@ Useful alternatives:
 "$BOX3_PYTHON" host/voice_agent.py --keyboard-only
 ```
 
-`--language auto` supports English/Chinese recognition and mixed utterances. The device-side capture mode uses an amplitude threshold and silence detection, not a neural VAD model. Type `/quit` to exit the voice agent.
+`--language auto` supports English/Chinese recognition and mixed utterances.
+Piper selects the Chinese or English voice for each language run in a reply;
+the voices have different timbres. Recognized requests and agent replies appear
+in the terminal and beside the avatar on the BOX-3. The device-side capture mode
+uses an amplitude threshold and silence detection, not a neural VAD model.
+Type `/quit` to exit the voice agent.
 
 ### 4. Configure Wi-Fi and transport switching
 
@@ -663,6 +681,32 @@ For wire commands, version compatibility, status flags (`audio=pull1`, `vad=1`,
 
 The standalone voice agent can play files from `~/Music` (or a directory selected with `--music-dir`). Spoken song requests are matched against local filenames, decoded with mpv, and streamed to the BOX-3. It does not search online music services or control a separate host-speaker jukebox process.
 
+Wake the assistant first, or say the wake phrase and request together. For example:
+
+```text
+Osiris! I like to listen to Bohemian Rhapsody.
+Osiris! Could you please play Bohemian Rhapsody?
+Osiris! Play the song Bohemian Rhapsody.
+Osiris! 我要聽卡門。
+```
+
+Once awake, the song request can be spoken without repeating the wake phrase.
+Typed requests do not need a wake phrase. English forms such as **“I'd like to
+hear …”**, **“Listen to …”**, and **“Put on …”** also trigger local playback,
+rather than sending the request to the language model as conversation. Use
+`--language auto` for English or mixed spoken requests; `--language zh` supplies
+a Chinese recognition hint.
+
+Matching uses the title contained in the filename; numbered tracks such as
+`01.Bohemian Rhapsody.flac` are supported. If several versions match, the agent
+asks for a more specific filename. A missing track must be added to the local
+library before it can play. MP3, WAV, FLAC, OGG, M4A, Opus, and AAC are supported.
+To select a different library:
+
+```bash
+host/.venv/bin/python host/voice_agent.py --port /dev/ttyACM0 --language auto --music-dir "$HOME/Music"
+```
+
 For an explicit local track, use the agent command:
 
 ```text
@@ -712,6 +756,7 @@ Automated tests and successful compilation do not substitute for hardware verifi
 | Wi-Fi connection fails | Confirm the footer IP, same LAN, reachable TCP port 8233, and no other controller |
 | Switch button missing | Provide both `--port` and `--host`, connect Wi-Fi, and flash firmware with `link=1` |
 | Playback interruptions | Update host and firmware; check `Audio supply` counters and USB/Wi-Fi transfer health |
+| Music request gets a conversational answer | Restart the updated host agent; try “I like to listen to Bohemian Rhapsody” or “Play Bohemian Rhapsody”; confirm the track exists under `--music-dir` |
 | Wake phrase ignored | Say the saved phrase (default “Osiris”), wait for Awake!, use `--language auto`; check any host `--wake-word` override |
 | Sleeping emoji missing | Restart the updated voice agent and flash firmware with `emojistates=1` |
 | Missing Chinese/Japanese/Korean glyphs | Select the correct display language and check bundled font coverage |
@@ -720,6 +765,7 @@ Automated tests and successful compilation do not substitute for hardware verifi
 ## Documentation
 
 - [Host setup, offline voice agent, and USB/TCP protocol](host/README.md)
+- [Voice latency, streaming, and timing logs](docs/voice-latency.md)
 - [PlatformIO configuration](platformio.ini)
 - [Firmware source](src/)
 - [Pi extension](pi/box3.ts)
@@ -732,4 +778,10 @@ This is a **voice terminal with standalone cloud and host-assisted modes**, not 
 
 ## License
 
-No project-wide license is declared here. Bundled Noto emoji assets retain their SIL Open Font License 1.1 and upstream notices in [third_party/lgfx_emojis](third_party/lgfx_emojis/). Those licenses do not establish a license for the rest of this repository.
+This project's original code is licensed under the **GNU General Public License
+version 3.0** (SPDX: `GPL-3.0-only`). See [LICENSE](LICENSE) for the full text.
+
+Bundled third-party assets retain their respective licenses and copyright
+notices. Noto emoji assets are licensed under the SIL Open Font License 1.1;
+see [third_party/lgfx_emojis](third_party/lgfx_emojis/) for attribution and
+upstream license notices.

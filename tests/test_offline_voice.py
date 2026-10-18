@@ -24,6 +24,37 @@ class OfflineVoiceTests(unittest.TestCase):
         self.assertEqual(voice.music_query('play song My Song'), 'My Song')
         self.assertIsNone(voice.music_query('\u4F60\u6709\u807D\u898B\u6211\u55CE'))
 
+    def test_natural_english_music_requests(self):
+        requests = [
+            'I like to listen to Bohemian Rhapsody',
+            'I would like to listen to Bohemian Rhapsody',
+            "I'd like to hear Bohemian Rhapsody",
+            'I\u2019d like to listen to Bohemian Rhapsody',
+            'I want to hear Bohemian Rhapsody',
+            'Could you please play Bohemian Rhapsody?',
+            'Please play the song Bohemian Rhapsody',
+            'Play music Bohemian Rhapsody',
+            'Play the track called Bohemian Rhapsody',
+            'Listen to Bohemian Rhapsody',
+            'Put on Bohemian Rhapsody, please.',
+            'PLAY "Bohemian Rhapsody"!',
+        ]
+        for request in requests:
+            with self.subTest(request=request):
+                self.assertEqual(voice.music_query(request), 'Bohemian Rhapsody')
+        for request in ('Who wrote Bohemian Rhapsody?', 'I like Queen', 'play',
+                        'Tell me about music', 'Please play'):
+            with self.subTest(request=request):
+                self.assertIsNone(voice.music_query(request))
+
+    def test_english_request_finds_numbered_song_in_nested_library(self):
+        with tempfile.TemporaryDirectory() as temp:
+            song = Path(temp) / 'England' / 'Queen' / '01.Bohemian Rhapsody.flac'
+            song.parent.mkdir(parents=True)
+            song.touch()
+            query = voice.music_query('I like to listen to Bohemian Rhapsody')
+            self.assertEqual(voice.find_local_music(Path(temp), query), [song])
+
     def test_local_music_lookup_keeps_ambiguous_versions(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
