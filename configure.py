@@ -31,7 +31,7 @@ def configuration():
         raise ValueError('No board environments found in platformio.ini')
     default = config.get('platformio', 'default_envs', fallback=targets[0])
     default = default.replace(',', ' ').split()[0]
-    state = {'env': default if default in targets else targets[0], 'port': ''}
+    state = {'env': default if default in targets else targets[0], 'port': '', 'emotion': 'llm'}
     try:
         saved = json.loads(STATE.read_text())
         if isinstance(saved, dict):
@@ -39,6 +39,8 @@ def configuration():
                 state['env'] = saved['env']
             if isinstance(saved.get('port'), str):
                 state['port'] = saved['port']
+            if saved.get('emotion') in ('legacy', 'llm'):
+                state['emotion'] = saved['emotion']
     except (OSError, ValueError):
         pass
     return targets, state
@@ -70,6 +72,14 @@ def command(executable, state, action):
     return args
 
 
+def build_environment(state):
+    return dict(os.environ, OSIRIS_EMOTION_MODE=state.get('emotion', 'llm'))
+
+
+def describe_command(args, state):
+    return 'OSIRIS_EMOTION_MODE=' + state.get('emotion', 'llm') + ' ' + shlex.join(args)
+
+
 def menu(screen, targets, state):
     curses.curs_set(0)
     selected = 0
@@ -77,7 +87,8 @@ def menu(screen, targets, state):
     actions = ['Build firmware', 'Build and upload', 'Clean build files',
                'Upload port', 'Save configuration', 'Exit']
     while True:
-        rows = [f"PCB: {LABELS.get(state['env'], state['env'])}"] + actions
+        emotion = 'Legacy state expressions' if state['emotion'] == 'legacy' else 'LLM emoji prefix (21 moods)'
+        rows = [f"PCB: {LABELS.get(state['env'], state['env'])}", f'Expressions: {emotion}'] + actions
         screen.erase()
         height, width = screen.getmaxyx()
 
@@ -86,14 +97,14 @@ def menu(screen, targets, state):
                 screen.addnstr(y, 0, value, width - 1, attr)
 
         line(0, 'Osiris firmware configuration', curses.A_BOLD)
-        line(1, 'Up/Down: move | Left/Right: PCB | Enter: select | q: exit')
+        line(1, 'Up/Down: move | Left/Right: change | Enter: select | q: exit')
         line(3, f"Environment: {state['env']}   Port: {state['port'] or 'auto-detect'}")
         for index, row in enumerate(rows):
             line(5 + index, ('> ' if index == selected else '  ') + row,
                  curses.A_REVERSE if index == selected else 0)
-        line(13, status)
-        if height < 15 or width < 50:
-            line(0, 'Resize terminal to at least 50 columns x 15 rows.')
+        line(14, status)
+        if height < 16 or width < 50:
+            line(0, 'Resize terminal to at least 50 columns x 16 rows.')
         screen.refresh()
         key = screen.getch()
         if key in (ord('q'), 27):
@@ -105,14 +116,16 @@ def menu(screen, targets, state):
         elif selected == 0 and key in (curses.KEY_LEFT, curses.KEY_RIGHT, 10, 13):
             step = -1 if key == curses.KEY_LEFT else 1
             state['env'] = targets[(targets.index(state['env']) + step) % len(targets)]
+        elif selected == 1 and key in (curses.KEY_LEFT, curses.KEY_RIGHT, 10, 13, curses.KEY_ENTER):
+            state['emotion'] = 'llm' if state['emotion'] == 'legacy' else 'legacy'
         elif key in (10, 13, curses.KEY_ENTER):
-            if selected == 6:
+            if selected == 7:
                 return
-            if selected == 5:
+            if selected == 6:
                 save(state)
                 status = 'Configuration saved.'
                 continue
-            if selected == 4:
+            if selected == 5:
                 curses.def_prog_mode()
                 curses.endwin()
                 try:
@@ -121,16 +134,16 @@ def menu(screen, targets, state):
                     curses.reset_prog_mode()
                     screen.clear()
                 continue
-            if selected in (1, 2, 3):
-                action = ('build', 'upload', 'clean')[selected - 1]
+            if selected in (2, 3, 4):
+                action = ('build', 'upload', 'clean')[selected - 2]
                 args = command(platformio(), state, action)
                 save(state)
                 curses.def_prog_mode()
                 curses.endwin()
                 try:
-                    print('\n' + shlex.join(args), flush=True)
+                    print('\n' + describe_command(args, state), flush=True)
                     try:
-                        result = subprocess.run(args, cwd=ROOT, check=False)
+                        result = subprocess.run(args, cwd=ROOT, env=build_environment(state), check=False)
                         status = f'{action}: exit code {result.returncode}'
                     except KeyboardInterrupt:
                         status = f'{action}: interrupted'
@@ -147,6 +160,7 @@ def main():
     parser.add_argument('--list', action='store_true', help='list available PCB environments')
     parser.add_argument('--env', choices=targets)
     parser.add_argument('--port', help='upload port; default is auto-detect or saved port')
+    parser.add_argument('--emotion', choices=('legacy', 'llm'), help='legacy state expressions or LLM emoji prefix')
     parser.add_argument('--action', choices=('build', 'upload', 'clean'))
     parser.add_argument('--dry-run', action='store_true', help='print command without running or saving')
     args = parser.parse_args()
@@ -158,13 +172,15 @@ def main():
         state['env'] = args.env
     if args.port is not None:
         state['port'] = args.port
+    if args.emotion:
+        state['emotion'] = args.emotion
     if args.action or args.dry_run:
         invocation = command(platformio(), state, args.action or 'build')
-        print(shlex.join(invocation), flush=True)
+        print(describe_command(invocation, state), flush=True)
         if args.dry_run:
             return 0
         save(state)
-        return subprocess.run(invocation, cwd=ROOT, check=False).returncode
+        return subprocess.run(invocation, cwd=ROOT, env=build_environment(state), check=False).returncode
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         parser.error('TUI requires a terminal; use --action build --env ENV for scripts.')
     if os.environ.get('TERM', '') in ('', 'dumb'):

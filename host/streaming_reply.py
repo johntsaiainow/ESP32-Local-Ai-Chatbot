@@ -85,7 +85,7 @@ def stream_reply(box, backend, text, temp, agent_name, language_for, pages_for):
             if item is None:
                 break
             sentence, language, path = item
-            box.expression('speaking')
+            box.expression(getattr(backend, 'emotion_expression', 'speaking'))
             # Commands and playback have a single owner; workers never touch the device.
             pages = list(pages_for(sentence, language))
             box.display(agent_name + '\n' + pages[0], language)

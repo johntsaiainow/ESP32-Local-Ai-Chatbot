@@ -11,6 +11,7 @@
 #include <SPI.h>
 #include <WiFiManager.h>
 #include "utf8.h"
+#include "emotion_protocol.h"
 #include "emoji_assets.h"
 #include "serial_write.h"
 #include "speech_gate.h"
@@ -192,6 +193,11 @@ constexpr AgentEmoji AGENT_EMOJIS[] = {
   {"warning", 0x26A0},
 };
 uint32_t agentEmojiCode(const String &state) {
+#if OSIRIS_LLM_EMOTION
+  if (state.startsWith("mood_")) {
+    for (const auto &entry : osiris_emotion::moods) if (state.substring(5) == entry.name) return entry.code;
+  }
+#endif
   for (const auto &entry : AGENT_EMOJIS) {
     if (state == entry.state) return entry.code;
   }
@@ -540,8 +546,9 @@ void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs, bool pu
 void handleCommand(const String &line) {
   hostControllerConnected = true;
   if (line == "BOX1 PING") {
-    protocolIO->printf("BOX1 OK mic=%d speaker=%d rate=16000 audio=pull1 capture=slot32-v3 playback=usbfast-v2 rx=4096 vad=1 listenstream=1 upload=checked1 stream=ring1 streamrev=4 sync=1 face=1 emojistates=1 link=1 wake=1 netchunk=%u netread=%u\n", audioReady, speakerReady,
-                       agentUsesWiFi ? 8192u : 0u, agentUsesWiFi ? 4096u : 0u);
+    protocolIO->printf("BOX1 OK mic=%d speaker=%d rate=16000 audio=pull1 capture=slot32-v3 playback=usbfast-v2 rx=4096 vad=1 listenstream=1 upload=checked1 stream=ring1 streamrev=4 sync=1 face=1 emojistates=1 link=1 wake=1 netchunk=%u netread=%u emotion=%s moods=%d\n", audioReady, speakerReady,
+                       agentUsesWiFi ? 8192u : 0u, agentUsesWiFi ? 4096u : 0u,
+                       OSIRIS_LLM_EMOTION ? "llm" : "legacy", OSIRIS_LLM_EMOTION);
   } else if (line == "BOX1 WAKE") {
     protocolIO->print("BOX1 OK wake_hex=");
     for (unsigned char c : wakePhrase) protocolIO->printf("%02x", c);

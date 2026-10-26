@@ -185,9 +185,13 @@ class Box3:
     def expression(self, state):
         extra_states = {'sleeping': 'happy', 'waiting': 'thinking', 'surprised': 'happy',
                         'love': 'happy', 'success': 'happy', 'warning': 'error'}
-        if state not in ('happy', 'sad', 'listening', 'thinking', 'speaking', 'music', 'error') and state not in extra_states:
+        from emotion_runtime import EMOTIONS
+        mood = state.startswith('mood_') and state[5:] in EMOTIONS.values()
+        if not mood and state not in ('happy', 'sad', 'listening', 'thinking', 'speaking', 'music', 'error') and state not in extra_states:
             raise ValueError('Unsupported agent expression')
         fields = self.reply_fields(self.status)
+        if mood and fields.get('moods') != '1':
+            state = 'speaking'
         if fields.get('face') == '1':
             if fields.get('emojistates') != '1':
                 state = extra_states.get(state, state)

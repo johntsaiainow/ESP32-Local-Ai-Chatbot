@@ -273,15 +273,17 @@ bool openClawJSON(JsonDocument &request, CloudBuffer &response, JsonDocument &js
 #include "cloud_text_stream.h"
 
 String cloudReply(const String &text, CloudDelta delta = nullptr, void *context = nullptr) {
-  const char *instructions = "You are Osiris. Reply in the same language as the current user; use Traditional Chinese for Chinese. "
-    "Keep spoken replies under 35 words. No markdown or emoji. You have no web, weather, code execution or device tools. Never invent live facts.";
+  String instructions = "You are Osiris. Reply in the same language as the current user; use Traditional Chinese for Chinese. "
+    "Keep spoken replies under 35 words. No markdown. You have no web, weather, code execution or device tools. Never invent live facts.";
+  instructions += OSIRIS_LLM_EMOTION ? osiris_emotion::prompt : " No emoji.";
   JsonDocument request(&cloudJsonAllocator), json(&cloudJsonAllocator);
   CloudBuffer response(128 * 1024);
   if (cloudMode == "openclaw") {
     request["model"] = "openclaw/" + openClawAgent; request["stream"] = true;
     auto messages = request["messages"].to<JsonArray>();
     auto system = messages.add<JsonObject>(); system["role"] = "system";
-    system["content"] = "Reply in the user's language; use Traditional Chinese for Chinese. Keep spoken replies under 35 words, without markdown or emoji. Only claim actions confirmed by your tools.";
+    system["content"] = String("Reply in the user's language; use Traditional Chinese for Chinese. Keep spoken replies under 35 words, without markdown. Only claim actions confirmed by your tools.") +
+      (OSIRIS_LLM_EMOTION ? osiris_emotion::prompt : " No emoji.");
     for (size_t n = 0; n < cloudHistoryCount; ++n) {
       auto user = messages.add<JsonObject>(); user["role"] = "user"; user["content"] = cloudHistoryUser[n];
       auto reply = messages.add<JsonObject>(); reply["role"] = "assistant"; reply["content"] = cloudHistoryReply[n];
@@ -467,10 +469,20 @@ void processCloudUtterance(bool alreadyAwake) {
   if (!speech.start()) { cloudError = "No memory/task for sentence speech."; return; }
   const uint32_t modelStarted = millis();
   String reply = cloudReply(text, CloudSentenceQueue::delta, &speech); reply.trim();
+#if OSIRIS_LLM_EMOTION
+  if (!speech.emotion.finish()) {
+    if (cloudError.isEmpty()) cloudError = "Invalid emotion prefix or empty spoken reply.";
+    reply = "";
+  } else {
+    reply = speech.emotion.text.c_str(); reply.trim();
+  }
+#endif
+  const String replyFace = OSIRIS_LLM_EMOTION && speech.emotion.mood ?
+    String("mood_") + speech.emotion.mood->name : String("speaking");
   Serial.printf("LATENCY stage=llm elapsed_ms=%lu first_text_ms=%lu\n", (unsigned long)(millis()-modelStarted),
     (unsigned long)(speech.firstText ? speech.firstText-modelStarted : 0));
   const bool generated = cloudError.isEmpty() && !reply.isEmpty() && reply.length() <= 2048;
-  if (generated) cloudScreen("speaking", reply);
+  if (generated) cloudScreen(replyFace, reply);
   const bool spoken = speech.finish(generated);
   Serial.printf("LATENCY stage=turn elapsed_ms=%lu first_audio_ms=%lu ok=%d\n", (unsigned long)(millis()-turnStarted),
     (unsigned long)(cloudFirstAudio.load() ? cloudFirstAudio.load()-turnStarted : 0), generated && spoken);
@@ -479,7 +491,7 @@ void processCloudUtterance(bool alreadyAwake) {
   if (reply.isEmpty() || reply.length() > 2048) {
     if (cloudError.isEmpty()) cloudError = "Empty/oversized cloud reply."; return;
   }
-  cloudScreen("speaking", reply);
+  cloudScreen(replyFace, reply);
   if (!spoken) return;
   if (cloudHistoryCount == 4) {
     for (size_t n = 1; n < 4; ++n) { cloudHistoryUser[n - 1] = cloudHistoryUser[n]; cloudHistoryReply[n - 1] = cloudHistoryReply[n]; }

@@ -50,6 +50,7 @@ class CloudChat:
         if provider not in ('openai', 'gemini', 'openclaw'):
             raise ValueError('Cloud provider must be openai, gemini, or openclaw')
         self.provider = provider
+        self.emotion_mode = False
         variable = {'openai': 'OPENAI_API_KEY', 'gemini': 'GEMINI_API_KEY',
                     'openclaw': 'OPENCLAW_GATEWAY_TOKEN'}[provider]
         self.key = os.environ.get(variable, '').strip()
@@ -77,6 +78,13 @@ class CloudChat:
     def cancel(self):
         self.http.cancel()
 
+    def instructions(self, openclaw=False):
+        text = OPENCLAW_INSTRUCTIONS if openclaw else INSTRUCTIONS
+        if self.emotion_mode:
+            from emotion_runtime import EMOTION_PROMPT
+            text = text.replace('without markdown or emoji', 'without markdown') + EMOTION_PROMPT
+        return text
+
     def ask(self, text, on_delta=None):
         if on_delta is not None:
             return self._ask_stream(text, on_delta)
@@ -84,17 +92,17 @@ class CloudChat:
         if self.provider == 'openclaw':
             url = self.url
             payload = {'model': self.model, 'stream': False,
-                       'messages': [{'role': 'system', 'content': OPENCLAW_INSTRUCTIONS}] + messages}
+                       'messages': [{'role': 'system', 'content': self.instructions(True)}] + messages}
             headers = {'Authorization': 'Bearer ' + self.key}
         elif self.provider == 'openai':
             url = 'https://api.openai.com/v1/responses'
-            payload = {'model': self.model, 'instructions': INSTRUCTIONS,
+            payload = {'model': self.model, 'instructions': self.instructions(),
                        'input': messages, 'store': False}
             headers = {'Authorization': 'Bearer ' + self.key}
         else:
             url = ('https://generativelanguage.googleapis.com/v1beta/models/' +
                    quote(self.model, safe='') + ':generateContent')
-            payload = {'systemInstruction': {'parts': [{'text': INSTRUCTIONS}]},
+            payload = {'systemInstruction': {'parts': [{'text': self.instructions()}]},
                        'contents': [{'role': 'model' if item['role'] == 'assistant' else 'user',
                                      'parts': [{'text': item['content']}]} for item in messages]}
             headers = {'x-goog-api-key': self.key}
@@ -156,18 +164,18 @@ class CloudChat:
         messages = self.history + [{'role': 'user', 'content': text}]
         if self.provider == 'openai':
             url = 'https://api.openai.com/v1/responses'
-            payload = {'model': self.model, 'instructions': INSTRUCTIONS,
+            payload = {'model': self.model, 'instructions': self.instructions(),
                        'input': messages, 'store': False, 'stream': True}
             headers = {'Authorization': 'Bearer ' + self.key}
         elif self.provider == 'openclaw':
             url = self.url
             payload = {'model': self.model, 'stream': True,
-                       'messages': [{'role': 'system', 'content': OPENCLAW_INSTRUCTIONS}] + messages}
+                       'messages': [{'role': 'system', 'content': self.instructions(True)}] + messages}
             headers = {'Authorization': 'Bearer ' + self.key}
         else:
             url = ('https://generativelanguage.googleapis.com/v1beta/models/' +
                    quote(self.model, safe='') + ':streamGenerateContent?alt=sse')
-            payload = {'systemInstruction': {'parts': [{'text': INSTRUCTIONS}]},
+            payload = {'systemInstruction': {'parts': [{'text': self.instructions()}]},
                        'contents': [{'role': 'model' if item['role'] == 'assistant' else 'user',
                                      'parts': [{'text': item['content']}]} for item in messages]}
             headers = {'x-goog-api-key': self.key}

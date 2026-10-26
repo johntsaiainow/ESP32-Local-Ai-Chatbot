@@ -9,3 +9,6 @@ These are the Noto emoji assets used in LovyanGFX's official emoji example.
 Copyright 2018 The Noto Project Authors, SIL Open Font License 1.1 (OFL.txt).
 The upstream LGFX_Fonts package notice is retained in LGFX_Fonts-LICENSE.txt.
 Only selected PNG arrays are embedded; no external font runtime is required.
+The additional 64×64 mood images are from the same pinned source and are
+compiled only when `OSIRIS_LLM_EMOTION=1` (the default); legacy mode keeps only
+the original state-expression images.

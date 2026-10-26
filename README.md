@@ -191,7 +191,8 @@ python3 configure.py
 ```
 
 Use ↑/↓ to choose a row, ←/→ on the PCB row to switch boards, and Enter to
-select. The menu supports build, build/upload, clean, and an optional upload
+select. The **Expressions** row switches between **LLM emoji prefix (21 moods)**
+(default) and **Legacy state expressions**. The menu supports build, build/upload, clean, and an optional upload
 port (blank means PlatformIO auto-detection). Build/upload starts flashing
 immediately when selected. Configuration is saved locally in the ignored
 `.build-menu.json` when you run an action or choose **Save configuration**;
@@ -204,8 +205,21 @@ For scripts or to preview the command:
 ```bash
 python3 configure.py --list
 python3 configure.py --env cores3 --action build --dry-run
+python3 configure.py --env cores3 --emotion llm --action build
 python3 configure.py --env lichuang_s3 --action upload --port /dev/ttyACM0
 ```
+
+The expression choice is compiled into the firmware. Legacy mode retains the
+existing listening/thinking/speaking states. LLM mode requests an emoji on the
+first line, displays its mood, and strips the prefix and emoji ranges from
+spoken text before sentence synthesis. Invalid/missing prefixes fail the turn.
+Standalone providers and the updated `host/voice_agent.py` support the option;
+the host reads `emotion=llm moods=1` from firmware status automatically. Older
+host scripts continue using state expressions. See [setup and limits](docs/emotion-mode.md).
+
+Direct `pio run` also uses the locally saved expression choice. To override it
+for one invocation without saving, use `OSIRIS_EMOTION_MODE=legacy pio run` or
+`OSIRIS_EMOTION_MODE=llm pio run`. Board flags and partition layouts are preserved.
 
 To inspect boot and hardware diagnostics:
 

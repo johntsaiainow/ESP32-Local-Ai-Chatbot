@@ -66,7 +66,8 @@ see the [microphone wiring and model details](crowpanel7.md).
 
 Run `python3 configure.py` from the repository root for the PCB/build TUI.
 Select the PCB with left/right on the first row, then choose build or
-build/upload. The upload port is optional; blank uses automatic detection.
+build/upload. The **Expressions** row chooses the [LLM emoji-prefix mode](emotion-mode.md)
+(default) or legacy workflow states for any PCB. The upload port is optional; blank uses automatic detection.
 Selections are saved locally without editing `platformio.ini`. Board targets
 are read directly from its `[env:...]` sections. See the
 [menu instructions](../README.md#1-clone-and-build-firmware) for CLI options.

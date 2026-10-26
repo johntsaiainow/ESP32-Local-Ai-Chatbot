@@ -8,6 +8,7 @@ class CloudSentenceQueue {
   String error;
   uint32_t firstText = 0;
   osiris_voice::Sentences splitter;
+  osiris_emotion::Decoder emotion;
   CloudSentenceQueue() : splitter(emit, this) {}
   bool start() {
     cloudFirstAudio = 0;
@@ -24,7 +25,16 @@ class CloudSentenceQueue {
     if (!s.firstText) s.firstText = millis();
     // This callback runs inside HTTP/SSE/JSON frames. PNG/font rendering here
     // can exhaust loopTask's stack; render only after cloudReply unwinds.
-    return !s.failed && s.splitter.feed(text.c_str());
+    if (s.failed) return false;
+#if OSIRIS_LLM_EMOTION
+    std::string spoken;
+    if (!s.emotion.feed(text.c_str(), spoken)) {
+      s.error = "Invalid emotion prefix or reply text."; s.failed = true; return false;
+    }
+    return s.splitter.feed(spoken);
+#else
+    return s.splitter.feed(text.c_str());
+#endif
   }
   static bool emit(const std::string &text, void *context) {
     auto &s = *static_cast<CloudSentenceQueue *>(context);

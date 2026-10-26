@@ -18,6 +18,7 @@ import wave
 from box3 import Box3, Box3Connection
 from chat_backends import CloudChat
 from streaming_reply import stream_reply
+from emotion_runtime import EmotionBackend
 from pi_stream import stream_pi
 from pi_rpc import PiRPC
 from offline_speech import create_recognizer, render_music, synthesize, warmup_resident
@@ -301,9 +302,9 @@ def show_user_message(box, text, agent_name='Pi'):
             time.sleep(2)
 
 
-def speak_reply(box, text, temp, agent_name='Pi'):
+def speak_reply(box, text, temp, agent_name='Pi', expression='speaking'):
     print(f'\n{agent_name}: {text}\n', flush=True)
-    box.expression('speaking')
+    box.expression(expression)
     language = reply_language(text)
     pages = list(conversation_pages(text, language))
     output = Path(temp) / 'reply.wav'
@@ -547,7 +548,12 @@ def main():
                                 else:
                                     speak_reply(box, '\u672C\u6A5F\u97F3\u6A02\u8CC7\u6599\u593E\u627E\u4E0D\u5230\u9019\u9996\u6B4C\u3002\u8ACB\u5148\u653E\u5165\u97F3\u6A02\u6A94\uFF0C\u518D\u8AAA\u6B4C\u540D\u3002', temp)
                             else:
-                                if not args.no_stream_replies and (cloud is None or cloud.streaming is True):
+                                streaming = not args.no_stream_replies and (cloud is None or cloud.streaming is True)
+                                fields = Box3.reply_fields(box.status)
+                                llm_emotion = fields.get('emotion') == 'llm' and fields.get('moods') == '1'
+                                if cloud is not None:
+                                    cloud.emotion_mode = llm_emotion
+                                if streaming:
                                     if persistent_pi is not None:
                                         backend = persistent_pi
                                     elif cloud is None:
@@ -561,13 +567,21 @@ def main():
                                         backend = PiBackend()
                                     else:
                                         backend = cloud
+                                    if llm_emotion:
+                                        backend = EmotionBackend(backend)
                                     stream_reply(box, backend, text, temp, agent_name, reply_language, conversation_pages)
                                 else:
                                     llm_started = time.monotonic()
-                                    reply = cloud.ask(text) if cloud is not None else ask_pi(
-                                        text, session, no_extensions=args.pi_no_extensions)
+                                    class OneShotPi:
+                                        def ask(self, prompt):
+                                            return ask_pi(prompt, session, no_extensions=args.pi_no_extensions)
+                                    backend = cloud if cloud is not None else OneShotPi()
+                                    if llm_emotion:
+                                        backend = EmotionBackend(backend)
+                                    reply = backend.ask(text)
                                     print(f'LATENCY stage=llm elapsed_ms={(time.monotonic()-llm_started)*1000:.0f}', flush=True)
-                                    speak_reply(box, reply, temp, agent_name)
+                                    speak_reply(box, reply, temp, agent_name,
+                                                expression=getattr(backend, 'emotion_expression', 'speaking'))
                         response_completed = True
                     except (Exception, KeyboardInterrupt) as exc:
                         if isinstance(exc, KeyboardInterrupt):
