@@ -8,3 +8,5 @@
 compile_commands.json
 __pycache__/
 host/.venv/
+.build-menu.json
+.build-menu.tmp

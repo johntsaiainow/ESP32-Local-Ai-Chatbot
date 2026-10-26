@@ -184,6 +184,29 @@ These commands default to BOX-3. For other boards, specify `-e lichuang_s3`,
 `-e cores3`, `-e atoms3r_echo` or `-e crowpanel7_inmp441` for both build and upload. See the
 [board guide](docs/boards.md) before flashing; images are specific to each board.
 
+For an interactive PCB selection and build menu, run:
+
+```bash
+python3 configure.py
+```
+
+Use ↑/↓ to choose a row, ←/→ on the PCB row to switch boards, and Enter to
+select. The menu supports build, build/upload, clean, and an optional upload
+port (blank means PlatformIO auto-detection). Build/upload starts flashing
+immediately when selected. Configuration is saved locally in the ignored
+`.build-menu.json` when you run an action or choose **Save configuration**;
+`platformio.ini` and its default environment stay unchanged. Exit with `q`.
+Requires a Linux/macOS terminal and Python 3 with curses, with no extra Python
+packages. PlatformIO is found on PATH or in `~/.platformio/penv/bin/pio`.
+
+For scripts or to preview the command:
+
+```bash
+python3 configure.py --list
+python3 configure.py --env cores3 --action build --dry-run
+python3 configure.py --env lichuang_s3 --action upload --port /dev/ttyACM0
+```
+
 To inspect boot and hardware diagnostics:
 
 ```bash
