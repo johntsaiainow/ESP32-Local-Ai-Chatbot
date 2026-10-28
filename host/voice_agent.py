@@ -20,6 +20,7 @@ from chat_backends import CloudChat
 from streaming_reply import stream_reply
 from emotion_runtime import EmotionBackend
 from pi_stream import stream_pi
+from ruview_presence import RuViewPresence, saved_configuration
 from pi_rpc import PiRPC
 from offline_speech import create_recognizer, render_music, synthesize, warmup_resident
 
@@ -44,6 +45,11 @@ class WakeWordGate:
 
     def reset(self):
         self.deadline = None
+
+    def arm_presence(self):
+        """Accept a spoken request after a presence arrival."""
+        if self.waiting:
+            self.deadline = self.clock() + self.timeout
 
     def arm_followup(self):
         """Start a fresh listening window after the response finishes playing."""
@@ -374,6 +380,7 @@ def connection_options(port=None, host=None, tcp_port=8233, preferred=None):
 
 
 def main():
+    ruview_defaults = saved_configuration()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--provider', choices=('pi', 'openai', 'gemini', 'openclaw'), default='pi',
                         help='Reply backend (default: pi)')
@@ -399,6 +406,17 @@ def main():
                         help='Seconds to accept a request after a standalone wake phrase (default: 15)')
     parser.add_argument('--followup-timeout', type=float, default=30,
                         help='Stay awake after each completed reply (seconds, default: 30)')
+    ruview_switch = parser.add_mutually_exclusive_group()
+    ruview_switch.add_argument('--ruview', dest='ruview_enabled', action='store_true', default=None)
+    ruview_switch.add_argument('--no-ruview', dest='ruview_enabled', action='store_false')
+    parser.add_argument('--ruview-mqtt-host', help='Enable RuView presence wake via this MQTT broker')
+    parser.add_argument('--ruview-mqtt-port', type=int, default=1883)
+    parser.add_argument('--ruview-presence-topic', help='Exact presence state_topic from RuView MQTT discovery')
+    parser.add_argument('--ruview-mqtt-username')
+    parser.add_argument('--ruview-mqtt-password-env', default='MQTT_PASSWORD')
+    parser.add_argument('--ruview-mqtt-tls', action='store_true')
+    parser.add_argument('--ruview-on-payload', default='ON')
+    parser.add_argument('--ruview-off-payload', default='OFF')
     parser.add_argument('--pi-one-shot', action='store_true', help='Use one Pi CLI process per request instead of persistent RPC')
     parser.add_argument('--no-tts-warmup', action='store_true', help='Load Piper voices on first reply instead of startup')
     parser.add_argument('--pi-no-extensions', action='store_true',
@@ -413,6 +431,27 @@ def main():
     parser.add_argument('--save-recording', type=Path,
                         help='Overwrite this WAV with the latest window for microphone diagnosis')
     args = parser.parse_args()
+    enabled = args.ruview_enabled
+    if enabled is None:
+        enabled = bool(args.ruview_mqtt_host or args.ruview_presence_topic) or ruview_defaults.get('enabled', False)
+    if enabled:
+        args.ruview_mqtt_host = args.ruview_mqtt_host or ruview_defaults.get('ruview_mqtt_host')
+        args.ruview_presence_topic = args.ruview_presence_topic or ruview_defaults.get('ruview_presence_topic')
+        if not args.ruview_mqtt_host or not args.ruview_presence_topic:
+            parser.error('RuView is enabled: configure MQTT host and presence topic in configure.py or CLI')
+    else:
+        args.ruview_mqtt_host = args.ruview_presence_topic = None
+    if bool(args.ruview_mqtt_host) != bool(args.ruview_presence_topic):
+        parser.error('RuView requires both --ruview-mqtt-host and --ruview-presence-topic')
+    if args.ruview_mqtt_host:
+        if args.keyboard_only or args.no_wake_word:
+            parser.error('RuView presence wake requires voice mode with wake gating enabled')
+        if not 1 <= args.ruview_mqtt_port <= 65535:
+            parser.error('MQTT port must be 1..65535')
+        if any(c in args.ruview_presence_topic for c in '+#'):
+            parser.error('Use one exact RuView presence topic without wildcards')
+        if not args.ruview_on_payload or not args.ruview_off_payload or args.ruview_on_payload == args.ruview_off_payload:
+            parser.error('Presence ON/OFF payloads must be nonempty and distinct')
     if not 1 <= args.tcp_port <= 65535:
         parser.error('TCP port must be 1..65535')
     try:
@@ -452,6 +491,14 @@ def main():
     wake_next_poll = 0
     try:
         with tempfile.TemporaryDirectory(prefix='box3-agent-') as temp, ExitStack() as resources:
+            presence = None
+            if args.ruview_mqtt_host:
+                presence = RuViewPresence(
+                    args.ruview_mqtt_host, args.ruview_mqtt_port, args.ruview_presence_topic,
+                    args.ruview_mqtt_username, os.environ.get(args.ruview_mqtt_password_env),
+                    args.ruview_on_payload, args.ruview_off_payload, args.ruview_mqtt_tls)
+                resources.callback(presence.close)
+                print('RuView presence wake enabled; waiting for live MQTT presence.', flush=True)
             session = Path(temp) / 'pi-session.jsonl'
             if not args.no_stream_replies and not args.no_tts_warmup and not args.keyboard_only:
                 print('Preparing Piper voices before listening...', flush=True)
@@ -483,6 +530,10 @@ def main():
                                 wake_ui = None
                         except (RuntimeError, ValueError) as exc:
                             print('Wake setting:', exc, file=sys.stderr)
+                    if presence is not None and presence.consume() and wake_gate.waiting:
+                        wake_gate.arm_presence()
+                        wake_ui = None
+                        print('RuView arrival: accepting a spoken request.', flush=True)
                     if wake_gate is not None and wake_ui != wake_gate.waiting:
                         wake_ui = show_wake_state(box, wake_gate)
                     try:
@@ -516,6 +567,9 @@ def main():
                             continue
                         listening_announced = False
                         if wake_gate is not None:
+                            if presence is not None and presence.consume() and wake_gate.waiting:
+                                wake_gate.arm_presence()
+                                wake_ui = None
                             text = wake_gate.accept(text)
                             if text is None:
                                 continue

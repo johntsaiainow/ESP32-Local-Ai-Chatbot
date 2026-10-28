@@ -31,7 +31,8 @@ def configuration():
         raise ValueError('No board environments found in platformio.ini')
     default = config.get('platformio', 'default_envs', fallback=targets[0])
     default = default.replace(',', ' ').split()[0]
-    state = {'env': default if default in targets else targets[0], 'port': '', 'emotion': 'llm'}
+    state = {'env': default if default in targets else targets[0], 'port': '', 'emotion': 'llm',
+             'wifi': True, 'wifi_repeater': False, 'ruview': False, 'ruview_mqtt_host': '', 'ruview_presence_topic': ''}
     try:
         saved = json.loads(STATE.read_text())
         if isinstance(saved, dict):
@@ -39,6 +40,15 @@ def configuration():
                 state['env'] = saved['env']
             if isinstance(saved.get('port'), str):
                 state['port'] = saved['port']
+            if isinstance(saved.get('wifi'), bool):
+                state['wifi'] = saved['wifi']
+            if isinstance(saved.get('wifi_repeater'), bool):
+                state['wifi_repeater'] = saved['wifi_repeater']
+            if isinstance(saved.get('ruview'), bool):
+                state['ruview'] = saved['ruview']
+            for key in ('ruview_mqtt_host', 'ruview_presence_topic'):
+                if isinstance(saved.get(key), str):
+                    state[key] = saved[key]
             if saved.get('emotion') in ('legacy', 'llm'):
                 state['emotion'] = saved['emotion']
     except (OSError, ValueError):
@@ -73,11 +83,16 @@ def command(executable, state, action):
 
 
 def build_environment(state):
-    return dict(os.environ, OSIRIS_EMOTION_MODE=state.get('emotion', 'llm'))
+    return dict(os.environ, OSIRIS_EMOTION_MODE=state.get('emotion', 'llm'),
+                OSIRIS_WIFI_ENABLED='on' if state.get('wifi', True) else 'off',
+                OSIRIS_WIFI_REPEATER='on' if state.get('wifi', True) and state.get('wifi_repeater', False) else 'off')
 
 
 def describe_command(args, state):
-    return 'OSIRIS_EMOTION_MODE=' + state.get('emotion', 'llm') + ' ' + shlex.join(args)
+    return ('OSIRIS_EMOTION_MODE=' + state.get('emotion', 'llm') +
+            ' OSIRIS_WIFI_ENABLED=' + ('on' if state.get('wifi', True) else 'off') +
+            ' OSIRIS_WIFI_REPEATER=' + ('on' if state.get('wifi', True) and state.get('wifi_repeater', False) else 'off') +
+            ' ' + shlex.join(args))
 
 
 def menu(screen, targets, state):
@@ -85,10 +100,15 @@ def menu(screen, targets, state):
     selected = 0
     status = ''
     actions = ['Build firmware', 'Build and upload', 'Clean build files',
-               'Upload port', 'Save configuration', 'Exit']
+               'Upload port', 'RuView presence wake', 'RuView MQTT settings', 'Wi-Fi repeater', 'Wi-Fi', 'Save configuration', 'Exit']
     while True:
         emotion = 'Legacy state expressions' if state['emotion'] == 'legacy' else 'LLM emoji prefix (21 moods)'
         rows = [f"PCB: {LABELS.get(state['env'], state['env'])}", f'Expressions: {emotion}'] + actions
+        rows[6] = 'RuView presence wake (host): ' + ('ON' if state.get('ruview', False) else 'OFF')
+        rows[8] = 'Wi-Fi repeater (firmware): ' + ('ON' if state.get('wifi_repeater', False) else 'OFF')
+        rows[9] = 'Wi-Fi (firmware): ' + ('ON' if state.get('wifi', True) else 'OFF - USB only')
+        if not state.get('wifi', True):
+            rows[8] = 'Wi-Fi repeater (firmware): unavailable - Wi-Fi OFF'
         screen.erase()
         height, width = screen.getmaxyx()
 
@@ -102,9 +122,9 @@ def menu(screen, targets, state):
         for index, row in enumerate(rows):
             line(5 + index, ('> ' if index == selected else '  ') + row,
                  curses.A_REVERSE if index == selected else 0)
-        line(14, status)
-        if height < 16 or width < 50:
-            line(0, 'Resize terminal to at least 50 columns x 16 rows.')
+        line(18, status)
+        if height < 20 or width < 50:
+            line(0, 'Resize terminal to at least 50 columns x 20 rows.')
         screen.refresh()
         key = screen.getch()
         if key in (ord('q'), 27):
@@ -118,12 +138,33 @@ def menu(screen, targets, state):
             state['env'] = targets[(targets.index(state['env']) + step) % len(targets)]
         elif selected == 1 and key in (curses.KEY_LEFT, curses.KEY_RIGHT, 10, 13, curses.KEY_ENTER):
             state['emotion'] = 'llm' if state['emotion'] == 'legacy' else 'legacy'
+        elif selected == 8 and key in (curses.KEY_LEFT, curses.KEY_RIGHT, 10, 13, curses.KEY_ENTER):
+            if state.get('wifi', True):
+                state['wifi_repeater'] = not state.get('wifi_repeater', False)
+        elif selected == 9 and key in (curses.KEY_LEFT, curses.KEY_RIGHT, 10, 13, curses.KEY_ENTER):
+            state['wifi'] = not state.get('wifi', True)
+        elif selected == 6 and key in (curses.KEY_LEFT, curses.KEY_RIGHT, 10, 13, curses.KEY_ENTER):
+            state['ruview'] = not state.get('ruview', False)
         elif key in (10, 13, curses.KEY_ENTER):
-            if selected == 7:
+            if selected == 11:
                 return
-            if selected == 6:
+            if selected == 10:
                 save(state)
                 status = 'Configuration saved.'
+                continue
+            if selected == 7:
+                curses.def_prog_mode()
+                curses.endwin()
+                try:
+                    for field, label in (('ruview_mqtt_host', 'MQTT broker hostname'),
+                                         ('ruview_presence_topic', 'Presence state topic')):
+                        current = state.get(field, '')
+                        value = input(f'{label} [{current}] (Enter keeps, - clears): ').strip()
+                        if value:
+                            state[field] = '' if value == '-' else value
+                finally:
+                    curses.reset_prog_mode()
+                    screen.clear()
                 continue
             if selected == 5:
                 curses.def_prog_mode()
@@ -161,6 +202,12 @@ def main():
     parser.add_argument('--env', choices=targets)
     parser.add_argument('--port', help='upload port; default is auto-detect or saved port')
     parser.add_argument('--emotion', choices=('legacy', 'llm'), help='legacy state expressions or LLM emoji prefix')
+    parser.add_argument('--wifi', choices=('on', 'off'), help='enable Wi-Fi or compile USB-only firmware')
+    parser.add_argument('--wifi-repeater', choices=('on', 'off'), help='compile firmware with/without Wi-Fi NAT repeater')
+    parser.add_argument('--ruview', choices=('on', 'off'), help='enable/disable host RuView presence wake')
+    parser.add_argument('--ruview-mqtt-host', help='MQTT broker hostname for the host voice agent')
+    parser.add_argument('--ruview-presence-topic', help='exact RuView presence state topic')
+    parser.add_argument('--save', action='store_true', help='save configuration without building or opening menu')
     parser.add_argument('--action', choices=('build', 'upload', 'clean'))
     parser.add_argument('--dry-run', action='store_true', help='print command without running or saving')
     args = parser.parse_args()
@@ -174,6 +221,21 @@ def main():
         state['port'] = args.port
     if args.emotion:
         state['emotion'] = args.emotion
+    if args.wifi is not None:
+        state['wifi'] = args.wifi == 'on'
+    if args.wifi_repeater is not None:
+        state['wifi_repeater'] = args.wifi_repeater == 'on'
+    if args.ruview is not None:
+        state['ruview'] = args.ruview == 'on'
+    for field in ('ruview_mqtt_host', 'ruview_presence_topic'):
+        if getattr(args, field) is not None:
+            state[field] = getattr(args, field)
+    if args.save and not args.action and not args.dry_run:
+        save(state)
+        print('Configuration saved. RuView host presence wake: ' + ('ON' if state['ruview'] else 'OFF'))
+        print('Wi-Fi firmware option: ' + ('ON' if state['wifi'] else 'OFF - USB only') + '; rebuild/upload to apply')
+        print('Wi-Fi repeater firmware option: ' + ('ON' if state['wifi'] and state['wifi_repeater'] else 'OFF') + '; rebuild/upload to apply')
+        return 0
     if args.action or args.dry_run:
         invocation = command(platformio(), state, args.action or 'build')
         print(describe_command(invocation, state), flush=True)

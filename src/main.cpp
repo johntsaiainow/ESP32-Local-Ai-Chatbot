@@ -16,6 +16,7 @@
 #include "serial_write.h"
 #include "speech_gate.h"
 #include "wifi_recovery.h"
+#include "wifi_repeater.h"
 #include <esp_rom_crc.h>
 #include <driver/i2s_std.h>
 #include <esp_system.h>
@@ -26,6 +27,7 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024)
 #include "boards/display.h"
 
 WiFiManager wifiManager;
+WiFiRepeater wifiRepeater;
 #include "cloud_settings.h"
 String setupSSID;
 constexpr char SETUP_PASSWORD[] = "box3setup";
@@ -41,13 +43,13 @@ bool hostHasUSB = false, hostHasWiFi = false;
 
 void drawSettingsBar() {
   const bool setting = wifiManager.getConfigPortalActive();
-  const bool connected = WiFi.status() == WL_CONNECTED;
+  const bool connected = OSIRIS_WIFI_ENABLED && WiFi.status() == WL_CONNECTED;
   const bool canSwitch = !setting && !directCloudEnabled() && hostHasUSB && hostHasWiFi && connected;
   const String firstLine = setting ? setupSSID :
       String("Via: ") + (directCloudEnabled() ? cloudMode : String(agentUsesWiFi ? "WiFi" : hostControllerConnected ? "USB" : "Offline")) +
       (!directCloudEnabled() && hostControllerConnected && requestedWiFi != agentUsesWiFi ? " (switch pending)" : "");
-  const String secondLine = setting ? String("192.168.4.1  PW: box3setup") :
-      connected ? WiFi.localIP().toString() : String(wifiStartupPending ? "WiFi connecting..." : wifiRecovery.recovering() ? "WiFi reconnecting..." : "WiFi offline");
+  const String secondLine = !OSIRIS_WIFI_ENABLED ? String("WiFi OFF - USB only") : setting ? String("192.168.4.1  PW: box3setup") :
+      connected ? WiFi.localIP().toString() + (wifiRepeater.active() ? " RP:on" : "") : String(wifiStartupPending ? "WiFi connecting..." : wifiRecovery.recovering() ? "WiFi reconnecting..." : "WiFi offline");
   static String previousFirst, previousSecond;
   static bool previousSetting = false, previousSwitch = false, drawn = false;
   if (drawn && firstLine == previousFirst && secondLine == previousSecond &&
@@ -78,9 +80,11 @@ void drawSettingsBar() {
     target.setTextColor(TFT_WHITE, TFT_BLUE);
     target.setCursor(199, top + 10); target.print("Switch");
   }
+  if (OSIRIS_WIFI_ENABLED) {
   target.fillRoundRect(258, top + 1, 61, 26, 4, TFT_DARKGREY);
   target.setTextColor(TFT_WHITE, TFT_DARKGREY);
   target.setCursor(264, top + 10); target.print(setting ? "Exit" : "Settings");
+  }
   target.setTextColor(TFT_WHITE, TFT_BLACK); target.setFont(previousFont);
   if (buffered) bar.pushSprite(&lcd, 0, 212);
   previousFirst = firstLine; previousSecond = secondLine;
@@ -88,17 +92,29 @@ void drawSettingsBar() {
 }
 
 void enterSettingMode() {
+  if (!OSIRIS_WIFI_ENABLED) return;
   wifiStartupPending = false;
   if (!wifiManager.getConfigPortalActive()) {
+    wifiRepeater.stop();
     wifiManager.startConfigPortal(setupSSID.c_str(), SETUP_PASSWORD);
   }
   drawSettingsBar();
 }
 
 void setupWiFi() {
+#if !OSIRIS_WIFI_ENABLED
+  WiFi.setAutoReconnect(false);
+  WiFi.mode(WIFI_OFF);
+  loadCloudSettings();  // Preserve the saved wake phrase; never rewrite NVS mode.
+  wifiStartupPending = false;
+  Serial.println("WIFI disabled - USB only");
+  drawSettingsBar();
+  return;
+#else
   wifiManager.setDebugOutput(false); // Keep credentials off the USB log.
   wifiManager.setConfigPortalBlocking(false);
   wifiManager.setConfigPortalTimeout(180);
+  wifiManager.setAPStaticIPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
   wifiManager.setConnectTimeout(10);
   wifiManager.setSaveConnectTimeout(10);
   setupCloudSettings();
@@ -119,12 +135,14 @@ void setupWiFi() {
   WiFi.begin(); // Reuse credentials stored by WiFiManager in NVS.
   wifiStarted = millis();
   drawSettingsBar();
+#endif
 }
 
 // Poll before USB/audio early returns so Settings remains accessible in playback.
 void pollSettings() {
   boardPollInput();
   boardPresent();
+  if (!OSIRIS_WIFI_ENABLED) return;
   if (boardButtonHeld()) {
     if (wifiManager.getConfigPortalActive()) wifiManager.stopConfigPortal();
     else enterSettingMode();
@@ -147,6 +165,7 @@ void pollSettings() {
     Serial.printf("WIFI recovery connect_requested=%d status=%d\n", started, (int)WiFi.status());
     drawSettingsBar();
   }
+  wifiRepeater.poll(wifiManager.getConfigPortalActive());
   static bool touchHeld = false;
   static uint32_t lastPress = 0;
   static uint32_t lastTouchPoll = 0;
@@ -555,7 +574,10 @@ void handleCommand(const String &line) {
     protocolIO->println();
   } else if (line == "BOX1 LINK" || line.startsWith("BOX1 LINK ")) {
     if (line == "BOX1 LINK SET USB") requestedWiFi = false;
-    else if (line == "BOX1 LINK SET WIFI") requestedWiFi = true;
+    else if (line == "BOX1 LINK SET WIFI") {
+      if (!OSIRIS_WIFI_ENABLED) { protocolIO->println("BOX1 ERR wifi_disabled"); return; }
+      requestedWiFi = true;
+    }
     else if (line.startsWith("BOX1 LINK OPTIONS ")) {
       int usb, wifi; char extra;
       if (sscanf(line.c_str(), "BOX1 LINK OPTIONS %d %d %c", &usb, &wifi, &extra) != 2 ||
@@ -563,7 +585,7 @@ void handleCommand(const String &line) {
         protocolIO->println("BOX1 ERR link_options"); return;
       }
       hostHasUSB = usb;
-      hostHasWiFi = wifi;
+      hostHasWiFi = OSIRIS_WIFI_ENABLED && wifi;
     } else if (line != "BOX1 LINK") {
       protocolIO->println("BOX1 ERR link_command"); return;
     }
@@ -859,7 +881,7 @@ void pollAgent() {
     // Discard USB commands queued while the network controller owned audio.
     while (Serial.available()) Serial.read();
   }
-  if (!tcpOwned && agentServer.hasClient()) {
+  if (OSIRIS_WIFI_ENABLED && !tcpOwned && agentServer.hasClient()) {
     // Do not hand an in-progress USB transaction to a network client.
     WiFiClient incoming = agentServer.accept();
     if (playBuffer || recordBuffer || line.length() ||
@@ -995,7 +1017,7 @@ void setup() {
   // Draw the volume meter frame
   lcd.drawRect(20, 180, 280, 25, TFT_DARKGREY);
   setupWiFi();
-  agentServer.begin();
+  if (OSIRIS_WIFI_ENABLED) agentServer.begin();
   resetDirectCloud();
 }
 

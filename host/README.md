@@ -594,3 +594,8 @@ credentials for text inference and uses a separate OpenAI API key for speech.
 It runs without this Python host at runtime, but does not implement first-time
 account login on ESP32. See the [prototype setup and limitations](../README.md#experimental-chatgpt-subscription-adapter).
 Gemini subscription-account login is not implemented; its API mode remains available.
+
+## RuView presence wake
+
+Optional MQTT presence events can wake the host voice agent for a spoken request.
+See [RuView setup, behavior and validation limits](../docs/ruview.md).

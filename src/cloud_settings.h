@@ -1,5 +1,6 @@
 #pragma once
 #include <Preferences.h>
+#include "wifi_options.h"
 #include <ArduinoJson.h>
 #include "wake_phrase.h"
 #include "openclaw_utils.h"
@@ -37,7 +38,7 @@ WiFiManagerParameter sttModelParam("stt_model", "OpenAI transcription model", "g
 WiFiManagerParameter ttsModelParam("tts_model", "Speech model ID (must support TTS)", "", 96);
 WiFiManagerParameter voiceParam("cloud_voice", "Voice (blank: OpenAI alloy / Gemini Kore)", "", 64);
 
-bool directCloudEnabled() { return cloudMode == "openai" || cloudMode == "gemini" || cloudMode == "chatgpt" || cloudMode == "openclaw"; }
+bool directCloudEnabled() { return OSIRIS_WIFI_ENABLED && (cloudMode == "openai" || cloudMode == "gemini" || cloudMode == "chatgpt" || cloudMode == "openclaw"); }
 bool saveSubscriptionJSON(const String &value, bool persist) {
   JsonDocument json;
   if (value.length() > 8192 || deserializeJson(json, value)) {

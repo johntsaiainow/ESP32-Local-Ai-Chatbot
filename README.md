@@ -89,6 +89,7 @@ CoreS3, and this photo does not establish SE compatibility. See the
 - **Multilingual display:** English, Simplified Chinese, Traditional Chinese, Japanese, and Korean using bundled 16-pixel LovyanGFX efonts.
 - **Color emoji avatar:** LovyanGFX-rendered Noto emoji with a supported subset of inline icons and 13 state expressions, including sleeping while waiting for the wake phrase.
 - **USB or Wi-Fi transport:** display text, capture microphone audio, and play host-generated PCM audio; show the active transport and switch without losing the Pi session.
+- **RuView presence wake (host mode):** optional MQTT arrival events open the voice request window without a wake phrase. Requires a separate sensing node/server; see [setup and validation limits](docs/ruview.md).
 - **Configurable wake phrase:** choose your phrase in Settings (default “Osiris”), with a 15-second initial request window and 30-second follow-up window after each reply.
 - **WiFi Manager:** saved Wi-Fi credentials, automatic setup hotspot on startup connection failure, and an on-screen Settings button.
 - **Offline speech processing:** multilingual faster-whisper for Chinese/English and mixed speech, OpenCC for Traditional Chinese conversion, and Piper voice switching for mixed Chinese/English replies.
@@ -191,7 +192,15 @@ python3 configure.py
 ```
 
 Use ↑/↓ to choose a row, ←/→ on the PCB row to switch boards, and Enter to
-select. The **Expressions** row switches between **LLM emoji prefix (21 moods)**
+select. The **RuView presence wake (host)** row enables or disables MQTT arrival
+wake; **RuView MQTT settings** sets the broker and presence topic. Save and restart
+the host voice agent to apply it; see [RuView setup](docs/ruview.md).
+The **Wi-Fi (firmware)** row selects Wi-Fi ON or **OFF - USB only**; OFF also
+disables the setup hotspot, standalone cloud mode, TCP and repeater. Rebuild and
+upload to apply it; see [USB-only setup](docs/usb-only.md).
+The **Wi-Fi repeater (firmware)** row toggles the optional NAT hotspot (default OFF);
+build and upload to apply it. See [repeater setup and limits](docs/wifi-repeater.md).
+The **Expressions** row switches between **LLM emoji prefix (21 moods)**
 (default) and **Legacy state expressions**. The menu supports build, build/upload, clean, and an optional upload
 port (blank means PlatformIO auto-detection). Build/upload starts flashing
 immediately when selected. Configuration is saved locally in the ignored
