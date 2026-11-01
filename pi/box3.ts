@@ -22,6 +22,28 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerTool(defineTool({
+    name: "box3_battery",
+    label: "BOX-3 Battery Voltage",
+    description: "Read BOX-3-SENSOR 18650 battery-terminal voltage and approximate percentage. Requires battery sensing enabled in firmware. Presence and charging remain unknown; USB charging can produce voltage without a battery, so never claim confirmed presence or precise remaining capacity.",
+    parameters: Type.Object({}),
+    async execute(_id, _args, signal) {
+      const reading = await invoke(["battery"], signal);
+      return { content: [{ type: "text", text: reading }], details: {} };
+    },
+  }));
+
+  pi.registerTool(defineTool({
+    name: "box3_environment",
+    label: "BOX-3 Temperature and Humidity",
+    description: "Read current room temperature in Celsius and relative humidity from the attached ESP32-S3-BOX-3-SENSOR dock. Requires updated firmware and the sensor dock; this is a local measurement, not a weather forecast.",
+    parameters: Type.Object({}),
+    async execute(_id, _args, signal) {
+      const reading = await invoke(["sensor"], signal);
+      return { content: [{ type: "text", text: reading }], details: {} };
+    },
+  }));
+
+  pi.registerTool(defineTool({
     name: "box3_display",
     label: "BOX-3 Display",
     description: "Show UTF-8 text and supported emoji on the USB ESP-BOX-3. Select the text language; limited to 1024 UTF-8 bytes and the visible screen area.",

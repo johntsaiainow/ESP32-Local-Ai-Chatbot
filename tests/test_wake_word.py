@@ -1,5 +1,6 @@
 """Wake gating tests do not need microphone hardware or downloaded models."""
 import io
+import queue
 from pathlib import Path
 import sys
 import unittest
@@ -7,9 +8,79 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'host'))
 from voice_agent import WakeWordGate, listen_once, show_wake_state, sync_wake_phrase
+import voice_agent as voice
 
 
 class WakeWordTests(unittest.TestCase):
+    def test_pi_failure_keeps_no_ruview_conversation_open(self):
+        commands = Mock()
+        commands.get_nowait.side_effect = [queue.Empty, queue.Empty, '/quit']
+        box = Mock(status='BOX1 OK', synchronized=True)
+        box.environment.return_value = (25, 60)
+        with patch.object(sys, 'argv', ['voice_agent.py', '--ignore-config', '--port', '/dev/test', '--wake-word', 'Osiris']), \
+             patch.object(voice.queue, 'Queue', return_value=commands), \
+             patch.object(voice.threading, 'Thread'), patch.object(voice, 'create_recognizer'), \
+             patch.object(voice, 'PiRPC'), patch.object(voice, 'warmup_resident'), \
+             patch.object(voice, 'Box3Connection', return_value=box), \
+             patch.object(voice, 'listen_once', side_effect=['講個笑話', '現在幾度']), \
+             patch.object(voice, 'stream_reply', side_effect=RuntimeError('context limit')), \
+             patch.object(voice, 'speak_reply') as speak, \
+             patch('sys.stdout', io.StringIO()), patch('sys.stderr', io.StringIO()):
+            voice.main()
+        box.environment.assert_called_once()
+        speak.assert_called_once()
+
+    def test_five_minute_window_expires_and_reply_renews_it(self):
+        now = [0]
+        gate = WakeWordGate(clock=lambda: now[0], followup_timeout=300)
+        gate.arm_followup()
+        now[0] = 299
+        self.assertFalse(gate.waiting)
+        self.assertEqual(gate.accept('現在幾度'), '現在幾度')
+        gate.arm_followup()
+        now[0] = 598
+        self.assertFalse(gate.waiting)
+        now[0] = 599
+        self.assertTrue(gate.waiting)
+
+    def test_without_ruview_first_spoken_request_needs_no_wake_word(self):
+        commands = Mock()
+        commands.get_nowait.side_effect = [queue.Empty, '/quit']
+        box = Mock(status='BOX1 OK', synchronized=True)
+        box.environment.return_value = (25, 60)
+        with patch.object(sys, 'argv', ['voice_agent.py', '--ignore-config', '--port', '/dev/test', '--wake-word', 'Osiris']), \
+             patch.object(voice.queue, 'Queue', return_value=commands), \
+             patch.object(voice.threading, 'Thread'), patch.object(voice, 'create_recognizer'), \
+             patch.object(voice, 'PiRPC'), patch.object(voice, 'warmup_resident'), \
+             patch.object(voice, 'Box3Connection', return_value=box), \
+             patch.object(voice, 'listen_once', return_value='現在幾度'), \
+             patch.object(voice, 'speak_reply') as speak, patch('sys.stdout', io.StringIO()) as output:
+            voice.main()
+        box.environment.assert_called_once()
+        speak.assert_called_once()
+        self.assertIn('awake for 300s', output.getvalue())
+
+    def test_osiris_chinese_transcriptions_wake_and_extract_request(self):
+        for name in ('Osiris', 'osiris', '奧西里斯', '奥西里斯', '歐西里斯'):
+            with self.subTest(name=name):
+                gate = WakeWordGate('osiris')
+                self.assertIsNone(gate.accept(name + '！'))
+                self.assertFalse(gate.waiting)
+                self.assertEqual(gate.accept('現在幾度？'), '現在幾度？')
+                self.assertEqual(gate.accept(name + '，電量多少？'), '電量多少？')
+        gate = WakeWordGate('Nova')
+        self.assertIsNone(gate.accept('奧西里斯'))
+        self.assertTrue(gate.waiting)
+
+    def test_explicit_aliases_and_word_boundaries(self):
+        gate = WakeWordGate('Osiris', aliases=('小歐',))
+        self.assertEqual(gate.accept('小歐，溫度多少'), '溫度多少')
+        self.assertIsNone(gate.accept('歐西里斯'))
+        self.assertTrue(gate.waiting)
+        self.assertIsNone(gate.accept('MyOsirisApp'))
+        with self.assertRaises(ValueError):
+            WakeWordGate(aliases=('bad\x00alias',))
+
     def test_device_phrase_update_clears_existing_followup(self):
         gate = WakeWordGate()
         gate.arm_followup()

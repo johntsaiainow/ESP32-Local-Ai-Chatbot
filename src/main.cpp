@@ -7,6 +7,8 @@
 #include <LovyanGFX.hpp>
 #endif
 #include <Wire.h>
+#include "box3_environment.h"
+#include "box3_battery.h"
 #include <ESP_I2S.h>
 #include <SPI.h>
 #include <WiFiManager.h>
@@ -565,9 +567,21 @@ void listenForSpeech(int threshold, unsigned silenceMs, unsigned waitMs, bool pu
 void handleCommand(const String &line) {
   hostControllerConnected = true;
   if (line == "BOX1 PING") {
-    protocolIO->printf("BOX1 OK mic=%d speaker=%d rate=16000 audio=pull1 capture=slot32-v3 playback=usbfast-v2 rx=4096 vad=1 listenstream=1 upload=checked1 stream=ring1 streamrev=4 sync=1 face=1 emojistates=1 link=1 wake=1 netchunk=%u netread=%u emotion=%s moods=%d\n", audioReady, speakerReady,
+    protocolIO->printf("BOX1 OK mic=%d speaker=%d rate=16000 audio=pull1 capture=slot32-v3 playback=usbfast-v2 rx=4096 vad=1 listenstream=1 upload=checked1 stream=ring1 streamrev=4 sync=1 face=1 emojistates=1 link=1 wake=1 netchunk=%u netread=%u emotion=%s moods=%d environment=%d battery=%d\n", audioReady, speakerReady,
                        agentUsesWiFi ? 8192u : 0u, agentUsesWiFi ? 4096u : 0u,
-                       OSIRIS_LLM_EMOTION ? "llm" : "legacy", OSIRIS_LLM_EMOTION);
+                       OSIRIS_LLM_EMOTION ? "llm" : "legacy", OSIRIS_LLM_EMOTION, BOX3_ENVIRONMENT_SUPPORTED, BOX3_BATTERY_SUPPORTED);
+  } else if (line == "BOX1 BATTERY") {
+    uint32_t millivolts;
+    int percent;
+    const char *error = readBattery(millivolts, percent);
+    if (error) protocolIO->printf("BOX1 ERR %s\n", error);
+    else protocolIO->printf("BOX1 OK battery_mv=%lu percent_estimate=%d presence=unknown charging=unknown\n",
+                            static_cast<unsigned long>(millivolts), percent);
+  } else if (line == "BOX1 SENSOR") {
+    float temperature, humidity;
+    const char *error = readEnvironment(temperature, humidity);
+    if (error) protocolIO->printf("BOX1 ERR %s\n", error);
+    else protocolIO->printf("BOX1 OK temperature_c=%.2f humidity_pct=%.2f\n", temperature, humidity);
   } else if (line == "BOX1 WAKE") {
     protocolIO->print("BOX1 OK wake_hex=");
     for (unsigned char c : wakePhrase) protocolIO->printf("%02x", c);

@@ -11,21 +11,20 @@ server and the Osiris host. Home Assistant is not required. It does not flash
 RuView onto the chatbot board or add CSI capture to Osiris firmware. Desktop and
 standalone cloud modes are not connected to this adapter.
 
-## Enable or disable with configure.py
+## Enable or disable in the voice agent
 
-Run `python3 configure.py`. Set **RuView presence wake (host)** to ON or OFF
-using Left/Right or Enter. Open **RuView MQTT settings** to enter the broker
-hostname and exact presence state topic, then choose **Save configuration**.
-RuView defaults to OFF. The selection and connection settings are saved locally
-in `.build-menu.json`; restart `host/voice_agent.py` to apply them. Firmware
-rebuilding/flashing is not required for this host feature.
+Run `host/.venv/bin/python host/voice_agent.py --setup` to enter the broker
+hostname and exact presence state topic. Host options are saved in `.voice-agent.json`;
+firmware rebuilding/flashing is not required. Legacy `.build-menu.json` values
+are loaded when no saved voice profile exists.
 
-For scripts, save without building:
+For scripts, save without connecting (include your device endpoint on first setup):
 
 ```bash
-python3 configure.py --ruview on --ruview-mqtt-host 192.168.1.10 \
-  --ruview-presence-topic 'REPLACE_WITH_DISCOVERED_STATE_TOPIC' --save
-python3 configure.py --ruview off --save
+host/.venv/bin/python host/voice_agent.py --port /dev/ttyACM0 --ruview \
+  --ruview-mqtt-host 192.168.1.10 \
+  --ruview-presence-topic 'REPLACE_WITH_DISCOVERED_STATE_TOPIC' --save-config
+host/.venv/bin/python host/voice_agent.py --no-ruview --save-config
 ```
 
 After saving ON and installing the optional dependency, launch the host agent

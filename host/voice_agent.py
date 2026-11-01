@@ -20,17 +20,21 @@ from chat_backends import CloudChat
 from streaming_reply import stream_reply
 from emotion_runtime import EmotionBackend
 from pi_stream import stream_pi
-from ruview_presence import RuViewPresence, saved_configuration
+from ruview_presence import RuViewPresence
+from voice_settings import parse_arguments, save_arguments, setup_arguments
 from pi_rpc import PiRPC
 from offline_speech import create_recognizer, render_music, synthesize, warmup_resident
+
+PI_EXECUTABLE = 'pi'
 
 
 class WakeWordGate:
     """Gate recognized speech; a standalone wake phrase arms one next request."""
-    def __init__(self, keyword='Osiris', timeout=15, clock=time.monotonic, followup_timeout=30):
+    def __init__(self, keyword='Osiris', timeout=15, clock=time.monotonic, followup_timeout=30, aliases=None):
         self.timeout = timeout
         self.followup_timeout = followup_timeout
         self.clock = clock
+        self.aliases = aliases
         self.set_keyword(keyword)
 
     def set_keyword(self, keyword):
@@ -39,8 +43,14 @@ class WakeWordGate:
                 ord(ch) < 32 or ord(ch) == 127 for ch in keyword):
             raise ValueError('Wake phrase must contain text and fit within 96 UTF-8 bytes')
         self.keyword = keyword
-        self.pattern = re.compile(r'(?<![A-Za-z0-9_])' + re.escape(keyword) +
-                                  r'(?![A-Za-z0-9_])', re.IGNORECASE)
+        aliases = self.aliases if self.aliases is not None else (
+            ('奧西里斯', '奥西里斯', '歐西里斯', '欧西里斯') if keyword.casefold() == 'osiris' else ())
+        self.wake_words = (keyword,) + tuple(alias.strip() for alias in aliases if alias.strip())
+        if any(len(alias.encode('utf-8')) > 96 or any(ord(ch) < 32 for ch in alias) for alias in self.wake_words):
+            raise ValueError('Wake aliases must fit within 96 UTF-8 bytes without control characters')
+        alternatives = '|'.join(re.escape(word) for word in sorted(self.wake_words, key=len, reverse=True))
+        self.pattern = re.compile(r'(?<![A-Za-z0-9_])(?:' + alternatives +
+                                  r')(?![A-Za-z0-9_])', re.IGNORECASE)
         self.reset()
 
     def reset(self):
@@ -150,6 +160,8 @@ def listen_once(box, recognizer, seconds=4, save_recording=None, automatic=False
     stt_started = time.monotonic()
     text = recognizer.transcribe(pcm)
     print(f'LATENCY stage=stt elapsed_ms={(time.monotonic()-stt_started)*1000:.0f}', flush=True)
+    if text:
+        print(f'Heard: {text}', flush=True)
     if not text:
         print(f'No speech recognized. Selected model: {language}. '
               'Check the recording and selected language.', flush=True)
@@ -229,7 +241,7 @@ def pi_prompt(text):
 
 def ask_pi(text, session, timeout=180, no_extensions=False, on_delta=None, cancel=None):
     prompt = pi_prompt(text)
-    argv = ['pi', '--print', '--thinking', 'off',
+    argv = [PI_EXECUTABLE, '--print', '--thinking', 'off',
             '--exclude-tools', 'box3_*,get_room_temperature,jukebox_control']
     if no_extensions:
         argv.append('--no-extensions')
@@ -244,10 +256,101 @@ def ask_pi(text, session, timeout=180, no_extensions=False, on_delta=None, cance
     return result.stdout.strip()
 
 
+def battery_query(text):
+    phrase = re.sub(r'[\s，。！？、,.!?]', '', text)
+    phrase = phrase.translate(str.maketrans('电压现请查询装没', '電壓現請查詢裝沒'))
+    if phrase.startswith('請'):
+        phrase = phrase[1:]
+    return phrase in ('/battery', '電量', '電池電量', '目前電量', '剩餘電量', '剩余電量',
+                      '電量多少', '電池剩多少', '電池電量多少', '電池電壓', '查詢電量',
+                      '有沒有裝電池', '電池有沒有裝', '現在電量多少')
+
+
+def battery_reply(reading):
+    reply = f'電池端電壓 {reading["millivolts"] / 1000:.2f} 伏特。'
+    if reading['percent_estimate'] is None:
+        reply += '目前無法估計電量，可能未裝電池或電壓異常。'
+    else:
+        reply += f'依電壓估計電量約百分之 {reading["percent_estimate"]}。'
+    return reply + '無法確定是否裝有電池或正在充電。'
+
+
+def environment_query(text):
+    phrase = re.sub(r'[\s，。！？、,.!?]', '', text)
+    phrase = phrase.translate(str.maketrans('温湿现请', '溫濕現請'))
+    if phrase.startswith('請'):
+        phrase = phrase[1:]
+    return phrase in ('/sensor', '溫度', '濕度', '溫濕度', '現在幾度', '現在几度',
+                      '現在溫度', '現在濕度', '目前溫度', '目前濕度', '目前溫濕度',
+                      '現在溫度多少', '目前溫度多少', '現在濕度多少', '目前濕度多少',
+                      '現在溫濕度多少', '目前溫濕度多少',
+                      '溫度多少', '濕度多少', '溫度是多少', '濕度是多少',
+                      '查詢溫度', '查詢濕度', '查詢溫濕度', '查詢溫度和濕度',
+                      '查询溫度', '查询濕度', '查询溫濕度')
+
+
+def chinese_microphone_command(text):
+    """Only complete microphone-control requests bypass the reply provider."""
+    phrase = re.sub(r'[\s，。！？、,.!?]', '', text)
+    phrase = phrase.translate(str.maketrans('麦风关开请态闭启复帮状', '麥風關開請態閉啟復幫狀'))
+    for prefix in ('請幫我', '請', '幫我', '帮我'):
+        if phrase.startswith(prefix):
+            phrase = phrase[len(prefix):]
+            break
+    commands = {
+        'off': ('把麥克風關掉', '把麥克風關閉', '關掉麥克風', '關閉麥克風',
+                '麥克風關掉', '麥克風關閉', '停止收音'),
+        'on': ('把麥克風打開', '把麥克風開啟', '打開麥克風', '開啟麥克風',
+               '麥克風打開', '麥克風開啟', '恢復收音'),
+        'status': ('麥克風狀態', '目前麥克風狀態'),
+    }
+    for target, phrases in commands.items():
+        if phrase in phrases:
+            return '/mic ' + target
+    return None
+
+
+def volume_command(text):
+    """Match complete English and Chinese volume phrases only."""
+    phrase = re.sub(r'[\s，。！？、,.!?]', '', text)
+    phrase = phrase.translate(str.maketrans('声音调点', '聲音調點')).casefold()
+    if phrase.startswith(('請', '请')):
+        phrase = phrase[1:]
+    phrases = {
+        'up': ('大聲一點', '大聲點', '音量調高', '調高音量', '音量大一點', '音量增加',
+             'volumeup', 'turnvolumeup', 'turnthevolumeup', 'increasevolume'),
+        'down': ('小聲一點', '小聲點', '音量調低', '調低音量', '音量小一點', '音量降低',
+                 'volumedown', 'turnvolumedown', 'turnthevolumedown', 'lowervolume', 'decreasevolume'),
+        '0': ('靜音', '静音', 'mute'),
+        'status': ('目前音量', '現在音量', '现在音量', '音量多少', '音量是多少', 'volumestatus'),
+    }
+    for target, options in phrases.items():
+        if phrase in options:
+            return '/volume ' + target
+    return None
+
+
+def handle_volume_command(box, text):
+    target = text.split(maxsplit=1)[1].strip().lower() if ' ' in text else 'status'
+    current = box.playback_volume
+    if target == 'status':
+        print(f'Playback volume: {current}%', flush=True)
+        return
+    if target in ('up', 'down'):
+        value = max(0, min(100, current + (10 if target == 'up' else -10)))
+    elif target.isascii() and target.isdecimal() and len(target) <= 3 and 0 <= int(target) <= 100:
+        value = int(target)
+    else:
+        print('Usage: /volume up|down|status|0-100', flush=True)
+        return
+    box.set_volume(value)
+    print(f'Playback volume: {value}%', flush=True)
+
+
 def keyboard_loop(commands):
     while True:
         try:
-            text = input('Prompt (/quit, /music PATH, /transport usb|wifi|status): ').strip()
+            text = input('Prompt (/quit, /config save, /sensor, /battery, /mic on|off|status, /volume up|down|status|0-100, /music PATH, /transport usb|wifi|status): ').strip()
         except (EOFError, KeyboardInterrupt):
             return
         if text:
@@ -380,10 +483,16 @@ def connection_options(port=None, host=None, tcp_port=8233, preferred=None):
 
 
 def main():
-    ruview_defaults = saved_configuration()
+    global PI_EXECUTABLE
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--save-config', action='store_true', help='save current options and exit without connecting')
+    parser.add_argument('--setup', action='store_true', help='interactive host settings; save and exit')
+    parser.add_argument('--ignore-config', action='store_true', help='ignore saved voice options for this invocation')
+    parser.add_argument('--volume', type=int, default=100, help='initial playback volume, 0-100')
+    parser.add_argument('--mic-off', action='store_true', help='start with microphone capture paused')
     parser.add_argument('--provider', choices=('pi', 'openai', 'gemini', 'openclaw'), default='pi',
                         help='Reply backend (default: pi)')
+    parser.add_argument('--pi-executable', default='pi', help='Pi CLI executable name or path')
     parser.add_argument('--model', help='Model ID (OpenClaw: openclaw/<agentId>); or set BOX3_PROVIDER_MODEL')
     parser.add_argument('--port', help='USB port or socket://HOST:PORT (default: BOX3_PORT)')
     parser.add_argument('--host', help='BOX-3 Wi-Fi IP or hostname (default: BOX3_HOST)')
@@ -394,6 +503,8 @@ def main():
     parser.add_argument('--stt-backend', choices=('whisper', 'vosk'), default='whisper')
     parser.add_argument('--whisper-model', default=os.environ.get('BOX3_WHISPER_MODEL', 'small'),
                         help='Multilingual faster-whisper model name or local model directory')
+    parser.add_argument('--models-dir', type=Path, default=Path(os.environ.get('BOX3_MODELS_DIR', '~/aion-voice/models')).expanduser(),
+                        help='Piper/Vosk model directory')
     parser.add_argument('--threshold', type=float, default=80)
     parser.add_argument('--silence', type=float, default=0.6)
     parser.add_argument('--stream-capture', action='store_true', help='Experimental Wi-Fi LISTENSTREAM capture (default: stable LISTEN/pull)')
@@ -401,11 +512,12 @@ def main():
     parser.add_argument('--whisper-beam-size', type=int, choices=range(1, 6), default=1, help='Whisper beam width (1 is faster; 5 uses more CPU)')
     parser.add_argument('--keyboard-only', action='store_true')
     parser.add_argument('--wake-word', help='Override the device wake phrase (default: Settings value, or Osiris on older firmware)')
+    parser.add_argument('--wake-aliases', help='Comma-separated alternate wake spellings; Osiris includes Chinese transliterations by default')
     parser.add_argument('--no-wake-word', action='store_true', help='Send spoken requests without waking first')
     parser.add_argument('--wake-timeout', type=float, default=15,
                         help='Seconds to accept a request after a standalone wake phrase (default: 15)')
-    parser.add_argument('--followup-timeout', type=float, default=30,
-                        help='Stay awake after each completed reply (seconds, default: 30)')
+    parser.add_argument('--followup-timeout', type=float,
+                        help='Stay awake after each reply: default 300s without RuView, 30s with RuView')
     ruview_switch = parser.add_mutually_exclusive_group()
     ruview_switch.add_argument('--ruview', dest='ruview_enabled', action='store_true', default=None)
     ruview_switch.add_argument('--no-ruview', dest='ruview_enabled', action='store_false')
@@ -430,20 +542,23 @@ def main():
                         help='Continuous recording length in window mode (0.1 to 10 seconds)')
     parser.add_argument('--save-recording', type=Path,
                         help='Overwrite this WAV with the latest window for microphone diagnosis')
-    args = parser.parse_args()
+    args = parse_arguments(parser, sys.argv[1:])
+    if args.setup:
+        args = setup_arguments(parser, args)
+    if not 0 <= args.volume <= 100:
+        parser.error('Volume must be 0..100')
     enabled = args.ruview_enabled
     if enabled is None:
-        enabled = bool(args.ruview_mqtt_host or args.ruview_presence_topic) or ruview_defaults.get('enabled', False)
+        enabled = bool(args.ruview_mqtt_host or args.ruview_presence_topic)
     if enabled:
-        args.ruview_mqtt_host = args.ruview_mqtt_host or ruview_defaults.get('ruview_mqtt_host')
-        args.ruview_presence_topic = args.ruview_presence_topic or ruview_defaults.get('ruview_presence_topic')
         if not args.ruview_mqtt_host or not args.ruview_presence_topic:
-            parser.error('RuView is enabled: configure MQTT host and presence topic in configure.py or CLI')
-    else:
-        args.ruview_mqtt_host = args.ruview_presence_topic = None
-    if bool(args.ruview_mqtt_host) != bool(args.ruview_presence_topic):
+            parser.error('RuView is enabled: configure MQTT host and presence topic with --setup or CLI')
+    args.ruview_enabled = enabled
+    if args.followup_timeout is None:
+        args.followup_timeout = 30 if enabled else 300
+    if enabled and bool(args.ruview_mqtt_host) != bool(args.ruview_presence_topic):
         parser.error('RuView requires both --ruview-mqtt-host and --ruview-presence-topic')
-    if args.ruview_mqtt_host:
+    if enabled and args.ruview_mqtt_host:
         if args.keyboard_only or args.no_wake_word:
             parser.error('RuView presence wake requires voice mode with wake gating enabled')
         if not 1 <= args.ruview_mqtt_port <= 65535:
@@ -466,18 +581,32 @@ def main():
         parser.error('Recording length must be 0.1..10 seconds')
     if not 1 <= args.wake_timeout <= 120:
         parser.error('Wake timeout must be 1..120 seconds')
-    if not 1 <= args.followup_timeout <= 120:
-        parser.error('Follow-up timeout must be 1..120 seconds')
+    if not 1 <= args.followup_timeout <= 3600:
+        parser.error('Follow-up timeout must be 1..3600 seconds')
     try:
         wake_gate = None if args.no_wake_word or args.keyboard_only else WakeWordGate(
-            args.wake_word if args.wake_word is not None else 'Osiris', args.wake_timeout, followup_timeout=args.followup_timeout)
+            args.wake_word if args.wake_word is not None else 'Osiris',
+            args.wake_timeout if enabled else max(args.wake_timeout, args.followup_timeout),
+            followup_timeout=args.followup_timeout,
+            aliases=None if args.wake_aliases is None else args.wake_aliases.split(','))
     except ValueError as exc:
         parser.error(str(exc))
+    if args.save_config:
+        # Persist resolved environment endpoints too, so exports are not required next time.
+        args.port = args.port or os.environ.get('BOX3_PORT')
+        args.host = args.host or os.environ.get('BOX3_HOST')
+        args.transport = preferred
+        save_arguments(args)
+        print('Voice configuration saved. Next time run voice_agent.py without options.', flush=True)
+        return
     try:
         cloud = None if args.provider == 'pi' else CloudChat(args.provider, args.model)
     except ValueError as exc:
         parser.error(str(exc))
     agent_name = {'pi': 'Pi', 'openai': 'OpenAI', 'gemini': 'Gemini', 'openclaw': 'OpenClaw'}[args.provider]
+    PI_EXECUTABLE = args.pi_executable
+    import offline_speech
+    offline_speech.MODELS = args.models_dir.expanduser()
     wake_ui = None
     recognizer = None if args.keyboard_only else create_recognizer(
         args.language, args.stt_backend, args.whisper_model)
@@ -487,12 +616,15 @@ def main():
     threading.Thread(target=keyboard_loop, args=(commands,), daemon=True).start()
     vad = VoiceActivity(args.threshold, args.silence)
     box = Box3Connection(endpoints, preferred, stream_capture=args.stream_capture)
+    if args.volume != 100:
+        box.set_volume(args.volume)
     listening_announced = False
+    microphone_enabled = not args.keyboard_only and not args.mic_off
     wake_next_poll = 0
     try:
         with tempfile.TemporaryDirectory(prefix='box3-agent-') as temp, ExitStack() as resources:
             presence = None
-            if args.ruview_mqtt_host:
+            if enabled and args.ruview_mqtt_host:
                 presence = RuViewPresence(
                     args.ruview_mqtt_host, args.ruview_mqtt_port, args.ruview_presence_topic,
                     args.ruview_mqtt_username, os.environ.get(args.ruview_mqtt_password_env),
@@ -505,7 +637,7 @@ def main():
                 warmup_resident(('zh-TW', 'en'))
             persistent_pi = None
             if cloud is None and not args.no_stream_replies and not args.pi_one_shot:
-                argv = ['pi', '--mode', 'rpc', '--thinking', 'off', '--exclude-tools',
+                argv = [args.pi_executable, '--mode', 'rpc', '--thinking', 'off', '--exclude-tools',
                         'box3_*,get_room_temperature,jukebox_control', '--session', str(session)]
                 if args.pi_no_extensions:
                     argv.append('--no-extensions')
@@ -517,6 +649,7 @@ def main():
             print(f'Reply provider: {agent_name}' + (f' | Model: {cloud.model}' if cloud else ''), flush=True)
             print('Firmware:', box.status, flush=True)
             print('BOX-3 voice agent ready. Listening is paused during Pi requests and playback.')
+            startup_awake_pending = not enabled
             while True:
                 try:
                     try:
@@ -530,17 +663,24 @@ def main():
                                 wake_ui = None
                         except (RuntimeError, ValueError) as exc:
                             print('Wake setting:', exc, file=sys.stderr)
-                    if presence is not None and presence.consume() and wake_gate.waiting:
+                    if startup_awake_pending and microphone_enabled and wake_gate is not None:
+                        wake_gate.arm_followup()
+                        wake_ui = None
+                        startup_awake_pending = False
+                        print(f'RuView disabled: awake for {args.followup_timeout:g}s; replies renew the window.', flush=True)
+                    if microphone_enabled and presence is not None and presence.consume() and wake_gate.waiting:
                         wake_gate.arm_presence()
                         wake_ui = None
                         print('RuView arrival: accepting a spoken request.', flush=True)
-                    if wake_gate is not None and wake_ui != wake_gate.waiting:
+                    if microphone_enabled and wake_gate is not None and wake_ui != wake_gate.waiting:
                         wake_ui = show_wake_state(box, wake_gate)
+                    if recognizer is not None and wake_gate is not None:
+                        recognizer.wake_words = wake_gate.wake_words
                     try:
-                        text = commands.get(timeout=0.1) if args.keyboard_only else commands.get_nowait()
+                        text = commands.get(timeout=0.1) if not microphone_enabled else commands.get_nowait()
                         vad.reset()
                     except queue.Empty:
-                        if args.keyboard_only:
+                        if not microphone_enabled:
                             continue
                         if args.capture_mode == 'auto':
                             text = listen_once(box, recognizer, save_recording=args.save_recording,
@@ -570,11 +710,73 @@ def main():
                             if presence is not None and presence.consume() and wake_gate.waiting:
                                 wake_gate.arm_presence()
                                 wake_ui = None
+                            was_waiting = wake_gate.waiting
                             text = wake_gate.accept(text)
+                            if was_waiting and wake_gate.waiting and text is None:
+                                print(f'Wake phrase not matched: {wake_gate.keyword}', flush=True)
                             if text is None:
                                 continue
                     if text == '/quit':
                         break
+                    if text == '/config save':
+                        args.port = box.endpoints.get('usb')
+                        args.host = None
+                        if 'wifi' in box.endpoints:
+                            # Preserve the full socket URL, including a custom TCP port.
+                            if args.port is None:
+                                args.port = box.endpoints['wifi']
+                            else:
+                                from urllib.parse import urlsplit
+                                endpoint = urlsplit(box.endpoints['wifi'])
+                                args.host, args.tcp_port = endpoint.hostname, endpoint.port
+                        args.transport = box.active
+                        args.volume = box.playback_volume
+                        args.mic_off = not microphone_enabled
+                        save_arguments(args)
+                        print('Voice configuration saved.', flush=True)
+                        continue
+                    normalized_volume_command = volume_command(text)
+                    if normalized_volume_command is not None:
+                        handle_volume_command(box, normalized_volume_command)
+                        language = reply_language(text)
+                        status = (f'音量：{box.playback_volume}%' if language == 'zh-TW'
+                                  else f'Volume: {box.playback_volume}%')
+                        show_status(box, 'happy', status, language)
+                        vad.reset()
+                        listening_announced = False
+                        if wake_gate is not None:
+                            wake_gate.arm_followup()
+                            wake_ui = None
+                        continue
+                    if text.split(maxsplit=1)[0] == '/volume':
+                        handle_volume_command(box, text)
+                        continue
+                    microphone_command = chinese_microphone_command(text)
+                    if microphone_command is not None:
+                        text = microphone_command
+                    if text.split(maxsplit=1)[0] == '/mic':
+                        target = text.split(maxsplit=1)[1].strip().lower() if ' ' in text else 'status'
+                        if target not in ('on', 'off', 'status'):
+                            print('Usage: /mic on|off|status', flush=True)
+                            continue
+                        if target == 'on' and recognizer is None:
+                            print('Microphone unavailable with --keyboard-only; restart without that option.', flush=True)
+                            continue
+                        if target != 'status':
+                            microphone_enabled = target == 'on'
+                            vad.reset()
+                            listening_announced = False
+                            if wake_gate is not None:
+                                wake_gate.reset()
+                                if microphone_enabled and not enabled:
+                                    wake_gate.arm_followup()
+                            wake_ui = None
+                            if not microphone_enabled:
+                                show_status(box, 'sleeping', 'Microphone OFF\nType /mic on to resume.\nKeyboard prompts remain available.', 'en')
+                        print('Microphone: ' + ('ON' if microphone_enabled else 'OFF'), flush=True)
+                        if microphone_command is not None:
+                            box.display('麥克風已開啟' if microphone_enabled else '麥克風已關閉\n在終端輸入 /mic on 可恢復', 'zh-TW')
+                        continue
                     if text.startswith('/transport'):
                         target = text.split(maxsplit=1)[1].strip().lower() if ' ' in text else 'status'
                         try:
@@ -586,7 +788,24 @@ def main():
                         continue
                     response_completed = False
                     try:
-                        if text.startswith('/music '):
+                        if battery_query(text):
+                            try:
+                                reply = battery_reply(box.battery())
+                            except ValueError as exc:
+                                print('Battery:', exc, flush=True)
+                                reply = '請在韌體設定選擇 BOX-3-SENSOR 底座並啟用電池偵測，再更新韌體。'
+                            print(reply, flush=True)
+                            speak_reply(box, reply, temp, agent_name)
+                        elif environment_query(text):
+                            try:
+                                temperature, humidity = box.environment()
+                                reply = f'目前溫度攝氏 {temperature:.1f} 度，相對濕度百分之 {humidity:.1f}。'
+                            except ValueError as exc:
+                                print('Sensor:', exc, flush=True)
+                                reply = '無法讀取溫濕度。請在設定程式選擇感測器底座並啟用溫濕度，更新 BOX-3 韌體，並接上 BOX-3-SENSOR 底座。'
+                            print(reply, flush=True)
+                            speak_reply(box, reply, temp, agent_name)
+                        elif text.startswith('/music '):
                             source = Path(text[7:].strip()).expanduser()
                             play_local_music(box, source, temp, args.music_backend)
                         else:
@@ -648,10 +867,10 @@ def main():
                         listening_announced = False
                         # Discard the first post-playback batch to reduce stale DMA
                         # audio triggering the next utterance. No echo cancellation.
-                        if recognizer is not None and getattr(box, 'synchronized', True):
+                        if microphone_enabled and recognizer is not None and getattr(box, 'synchronized', True):
                             box.capture(0.1)
                         if wake_gate is not None:
-                            if response_completed:
+                            if response_completed or not enabled:
                                 wake_gate.arm_followup()
                             else:
                                 wake_gate.reset()
@@ -665,6 +884,8 @@ def main():
                     wake_ui = None
                     if wake_gate is not None:
                         wake_gate.reset()
+                        if not enabled:
+                            wake_gate.arm_followup()
                     try:
                         box.reconnect()
                         print('Device reconnected; failed utterance was discarded. Please speak again.', flush=True)

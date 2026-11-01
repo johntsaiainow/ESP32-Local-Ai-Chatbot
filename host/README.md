@@ -47,6 +47,97 @@ An endpoint being configured does not guarantee that its cable/network is reacha
 With no `--transport`, an explicit `--host` selects Wi-Fi, an explicit `--port`
 selects that port, and environment defaults prefer `BOX3_HOST` over `BOX3_PORT`.
 
+In the `host/voice_agent.py` console, use `/mic off` to pause microphone capture,
+`/mic on` to resume, and `/mic status` to check its state. Keyboard prompts and
+speaker playback remain available while the microphone is off. Commands take
+effect after the current recording, recognition, or reply finishes; they do not
+interrupt an active operation. This pauses host recording, without powering down
+the microphone hardware. Restarting restores the default enabled state.
+With `--keyboard-only`, microphone capture stays disabled; restart without that
+option to enable it. These commands belong to voice mode, not the Pi tools console.
+
+也可說或在終端輸入「把麥克風關掉」「關閉麥克風」「停止收音」，由主機直接
+處理，不送給 Pi。「打開麥克風」「恢復收音」及「麥克風狀態」也可在終端輸入。
+關閉收音後無法用語音重新開啟，請在終端輸入 `/mic on` 或「打開麥克風」。
+語音控制仍須遵守喚醒詞規則；指令於目前收音／辨識完成後生效。
+
+Use `/volume up` or `/volume down` in the voice agent console to change playback
+volume by 10 percentage points. `/volume 50` sets 50%, `/volume 0` mutes playback,
+and `/volume status` shows the level. The range is 0–100%, starting at 100%
+(the existing playback level). This scales speech and music audio on the host;
+it does not change microphone sensitivity or standalone firmware audio. Changes
+apply to subsequent playback after the current operation finishes, survive
+transport switches/reconnections, and reset when the voice agent restarts.
+No firmware update is required.
+
+中文也可直接說「大聲一點」「小聲一點」「音量調高」「音量調低」，
+每次調整 10 個百分點；「靜音」設為 0%，「目前音量」顯示音量。
+支援繁／簡體辨識結果，也可在終端輸入這些句子。啟用喚醒詞時，
+須先喚醒或在後續對話時間內使用。指令由主機直接處理，音量顯示在
+裝置螢幕和終端；一般包含這些字句的問答不會觸發調整。
+
+### BOX-3 溫度／濕度查詢
+
+需要 **ESP32-S3-BOX-3-SENSOR 感測器底座**，一般底座或 BOX-3 本體不提供此讀值。
+硬體配置依據 [Espressif BOX-3 BSP](https://github.com/espressif/esp-bsp/blob/master/bsp/esp-box-3/include/bsp/esp-box-3.h)
+與 [官方 Sensor Monitor 說明](https://documentation.espressif.com/esp-box/master/docs/getting_started.md)。
+AHT30 使用獨立 I2C 匯流排（SDA GPIO41、SCL GPIO40、位址 0x38）；
+讀值通過 CRC 檢查後才回傳，不使用 ESP32 晶片溫度代替室溫。
+
+執行 `python3 configure.py`，選擇 `esp32s3box3`，再將 `BOX-3-SENSOR dock`
+設為 YES，才可將 `Temperature / humidity` 設為 ON。兩者預設關閉；選擇無底座
+或其他板型時，溫濕度功能自動關閉。儲存後重新編譯並燒錄才會生效，
+也支援指令列：
+
+```sh
+python3 configure.py --env esp32s3box3 --sensor-dock on --environment-sensor on --save
+python3 configure.py --action upload
+```
+
+然後在 voice agent 終端輸入 `/sensor`，
+或說「現在幾度」「溫度多少」「濕度多少」「查詢溫濕度」。啟用喚醒詞時須先喚醒。
+主機讀取即時感測值，並以中文顯示及朗讀攝氏溫度和相對濕度，不經過 Pi 模型。
+沒有接底座、其他板型或韌體太舊時會提示無法讀取。
+也可以關閉 voice agent 後單獨測試（同一連線只能由一個程式控制）：
+
+```sh
+host/.venv/bin/python host/box3.py --port /dev/ttyACM0 sensor
+```
+
+協定：`BOX1 SENSOR` 回覆 `BOX1 OK temperature_c=25.25 humidity_pct=63.50`；
+失敗回覆 `BOX1 ERR sensor_missing`、`sensor_read`、`sensor_busy`、
+`sensor_crc`、`sensor_uncalibrated`、`sensor_bus` 或 `sensor_unsupported`。
+PING 的 `environment=1` 表示此韌體支援 BOX-3 底座查詢，並非底座已接上。
+使用 Pi 工具模式時也可要求查詢，`pi/box3.ts` 的 `box3_environment` 工具
+會透過相同連線讀取溫濕度。
+
+### BOX-3 底座 18650 電池
+
+在 `configure.py` 選 BOX-3 → `BOX-3-SENSOR dock: YES`，才可開啟
+`18650 battery voltage / estimate`。預設關閉；選擇無底座或其他板型會自動關閉。
+儲存、重新編譯並燒錄後，voice agent 可輸入 `/battery` 或說「電量多少」
+「電池電壓」「有沒有裝電池」。Pi 工具模式提供 `box3_battery`。
+
+```sh
+python3 configure.py --env esp32s3box3 --sensor-dock on --battery-sensor on --save
+python3 configure.py --action upload --port /dev/ttyACM0
+# 關閉 voice agent 後，可單獨查詢
+host/.venv/bin/python host/box3.py --port /dev/ttyACM0 battery
+```
+
+依 [官方 SENSOR-01 V1.1 電路圖](https://github.com/espressif/esp-box/blob/master/hardware/SCH_ESP32-S3-BOX-3_V1.0/SCH_ESP32-S3-BOX-3-SENSOR-01_V1.1_20230922.pdf)，
+GPIO10 經 301kΩ／100kΩ 分壓量測電池端電壓。程式平均 16 次校準 ADC 讀值，
+以粗略單節鋰電池電壓曲線估計百分比；不是電量計，充電、負載、電池老化和
+ADC 誤差都會影響估計。電壓不在 2.5–4.3 V 範圍時不提供百分比。
+沒有獨立電池插入或充電狀態輸入，因此兩者始終回報 `unknown`，不將低電壓
+直接判定為沒裝電池，也不將充電器提供的電壓判定為一定有電池。
+需在有／無電池及 USB／電池供電情境做實機比對後，再評估讀值準確度。
+
+協定：`BOX1 BATTERY` 回覆
+`BOX1 OK battery_mv=3800 percent_estimate=50 presence=unknown charging=unknown`。
+`percent_estimate=-1` 表示無法估計；停用時回覆 `BOX1 ERR battery_disabled`。
+PING 的 `battery=1` 僅表示韌體已啟用此功能。
+
 Only one controller can own the audio buffers. While a TCP client is connected,
 USB commands are discarded and additional TCP clients are rejected. Closing the
 connection releases device buffers and returns control to USB. Restart the voice
@@ -57,6 +148,71 @@ The USB setup below and all speech/model installation steps still apply.
 
 
 ## Device and host setup
+
+喚醒詞為 `Osiris` 時，主機也接受 Whisper 辨識成「奧西里斯」「歐西里斯」
+及其簡體寫法。每次辨識出文字會在終端印出 `Heard:`；等待喚醒時沒有比對成功
+會顯示 `Wake phrase not matched`。這仍是錄音後的 Whisper 辨識，並非即時喚醒引擎，
+需要等待錄音和辨識完成。若顯示 `No speech recognized`，代表辨識沒有產生文字，
+別名比對也無法觸發；可先測試錄音品質和語言選擇。
+自訂別名可在 `voice_agent.py --setup` 的 `wake_aliases` 輸入逗號分隔文字，
+或使用 `--wake-aliases '奧西里斯,小歐' --save-config`。明確指定的別名會取代預設別名。
+
+未啟用 RuView 時，預設啟動即進入五分鐘對話狀態，不必先說喚醒詞；每次回覆完成後
+重新計時五分鐘，逾時才回到等待喚醒。重新開啟麥克風也會開啟對話時間。
+啟用 RuView 時仍等待喚醒詞／到達事件，預設回覆後對話時間為 30 秒。
+已有設定檔的秒數會保留；要改為五分鐘可執行：
+
+```sh
+host/.venv/bin/python host/voice_agent.py --followup-timeout 300 --save-config
+```
+
+也可在 `--setup` 調整 `followup_timeout`（1–3600 秒）。
+韌體回報 `emotion=llm moods=1` 時，等待下一句會保留最近一次 LLM emoji 表情，
+尚未回覆則顯示中性表情，不顯示舊的耳朵圖示。收到合法 emoji 前綴時，
+終端會印出 `LLM expression: mood_...` 以確認解析結果；Legacy 模式仍使用耳朵。
+沒有 RuView 時，回覆失敗也會重新開啟對話時間，重複說喚醒詞不會縮短為 15 秒。
+
+若 Pi 回報 `model context limit exceeded`，請檢查 LM Studio **實際載入**的 context
+大小。Pi 的擴充工具與系統提示也會佔用 context；模型 metadata 宣告支援的最大值
+不等於目前載入值。可在 LM Studio 增加 context 後重新載入模型，或暫用
+`--pi-no-extensions` 排除擴充，但該次對話將無法使用那些擴充工具。
+
+### 儲存 Pi 連線設定
+
+`voice_agent.py` 也能直接儲存自己的啟動選項，設定一次後不必每次重打：
+
+```sh
+host/.venv/bin/python host/voice_agent.py --port /dev/ttyACM0 --language zh --save-config
+# 下次直接啟動
+host/.venv/bin/python host/voice_agent.py
+```
+
+`--save-config` 會驗證並儲存後退出，不連線或載入語音模型。可保存 USB／Wi-Fi、
+provider、模型、語言、喚醒詞、收音模式及其他啟動選項；API 金鑰仍從環境變數讀取。
+執行中輸入 `/config save` 也會儲存目前連線、音量及麥克風開關。
+設定存於 `.voice-agent.json`（不提交 Git），下次自動載入。
+命令列明確提供的選項優先；`--ignore-config` 可暫時忽略已存設定，
+也可搭配 `--save-config` 用新的設定取代舊設定。
+
+也可用互動設定精靈，不必記住完整參數：
+
+```sh
+host/.venv/bin/python host/voice_agent.py --setup
+```
+
+可設定連接埠、位址、語言（auto／zh／en）、provider、模型、喚醒詞、收音模式、
+音量及 RuView MQTT。Enter 保留原值，`-` 清除選用欄位，完成後驗證並儲存退出。
+`configure.py` 現在只管理韌體及硬體選項；主機選項集中在 `voice_agent.py`。
+若尚無 `.voice-agent.json`，會讀取舊 `.host-connection.json` 的連線／語音模型設定
+和 `.build-menu.json` 的語言／RuView 設定；執行 `--save-config` 或 `/config save`
+即可整合保存。舊檔案保留，韌體儲存也不會刪除尚未搬移的舊主機欄位。
+已有 `.voice-agent.json` 時以該檔為準，命令列選項可覆蓋。
+語言選項控制語音辨識，變更後重啟主機即可，不需更新韌體。
+
+舊 Pi 工具模式的精靈保留為相容入口：`python3 -m host.connection_setup --host-setup`，
+其 `--host-start`／`--host-check` 也透過該模組執行，不再放在 `configure.py`。
+主機 Python 環境由啟動命令選擇；Pi CLI 需在 PATH，請先完成下方依賴安裝及 Pi 登入。
+裝置端須選 `host` 模式；Wi-Fi 連線須先設定裝置網路。
 
 1. Upload the updated firmware using PlatformIO (`pio run --target upload`).
 2. Connect the BOX-3's native USB data port to the Pi CLI host with a data cable.

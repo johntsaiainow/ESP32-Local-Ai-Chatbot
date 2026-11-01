@@ -8,7 +8,7 @@ import threading
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1]/'host'))
-from pi_rpc import PiRPC
+from pi_rpc import PiRPC, assistant_failure
 
 SERVER = r'''
 import json, os, sys
@@ -59,6 +59,13 @@ for line in sys.stdin.buffer:
 '''
 
 class PiRPCTests(unittest.TestCase):
+    def test_context_error_is_actionable_without_raw_diagnostics(self):
+        error = assistant_failure({'errorMessage': 'request exceeds the available context size private-secret'})
+        self.assertIn('context limit', error)
+        self.assertIn('LM Studio', error)
+        self.assertNotIn('private-secret', error)
+        self.assertNotIn('private-secret', assistant_failure({'errorMessage': 'private-secret'}))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -1,6 +1,4 @@
 """Optional RuView MQTT presence input; callbacks never touch the device."""
-import json
-from pathlib import Path
 import threading
 import time
 
@@ -84,21 +82,3 @@ class RuViewPresence:
     def close(self):
         self.client.disconnect()
         self.client.loop_stop()
-
-
-def saved_configuration(path=None):
-    """Read configure.py's optional host defaults without requiring a valid file."""
-    path = Path(path) if path is not None else Path(__file__).resolve().parents[1] / '.build-menu.json'
-    try:
-        state = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(state, dict):
-        return {}
-    result = {}
-    if isinstance(state.get('ruview'), bool):
-        result['enabled'] = state['ruview']
-    for field in ('ruview_mqtt_host', 'ruview_presence_topic'):
-        if isinstance(state.get(field), str):
-            result[field] = state[field]
-    return result

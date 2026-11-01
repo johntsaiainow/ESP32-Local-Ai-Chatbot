@@ -69,7 +69,8 @@ def stream_pi(argv, on_delta, timeout=180, cancel=None):
                     elif kind == 'message_end':
                         message = event.get('message', {})
                         if message.get('role') == 'assistant' and message.get('stopReason') in ('error', 'aborted'):
-                            raise RuntimeError('Pi assistant response failed or aborted')
+                            from pi_rpc import assistant_failure
+                            raise RuntimeError(assistant_failure(message))
                     elif kind == 'agent_settled':
                         complete = not event.get('aborted', False)
             code = process.wait(timeout=max(0.1, timeout-(time.monotonic()-started)))

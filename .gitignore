@@ -10,3 +10,7 @@ __pycache__/
 host/.venv/
 .build-menu.json
 .build-menu.tmp
+.host-connection.json
+.host-connection.tmp
+.voice-agent.json
+.voice-agent.tmp

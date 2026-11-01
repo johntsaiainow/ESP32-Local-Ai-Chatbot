@@ -65,6 +65,8 @@ class EmotionBackend:
         def delta(part):
             spoken = self.decoder.feed(part)
             if self.decoder.emotion:
+                if self.emotion_expression == 'speaking':
+                    print('LLM expression: mood_' + self.decoder.emotion, flush=True)
                 self.emotion_expression = 'mood_' + self.decoder.emotion
             if spoken and on_delta:
                 on_delta(spoken)

@@ -9,6 +9,15 @@ import time
 import uuid
 
 
+def assistant_failure(message):
+    """Expose actionable categories without echoing private provider diagnostics."""
+    detail = str(message.get('errorMessage', '')).lower()
+    if 'exceed_context_size' in detail or ('context' in detail and any(
+            word in detail for word in ('exceed', 'too long', 'maximum context'))):
+        return 'Pi model context limit exceeded; increase the loaded model context in LM Studio or use --pi-no-extensions'
+    return 'Pi response failed or aborted'
+
+
 class PiRPC:
     streaming = True
 
@@ -151,7 +160,7 @@ class PiRPC:
                 elif kind == 'message_end':
                     message = event.get('message', {})
                     if message.get('role') == 'assistant' and message.get('stopReason') in ('error', 'aborted'):
-                        raise RuntimeError('Pi response failed or aborted')
+                        raise RuntimeError(assistant_failure(message))
                 elif kind == 'agent_settled':
                     if event.get('aborted'):
                         raise RuntimeError('Pi response aborted')

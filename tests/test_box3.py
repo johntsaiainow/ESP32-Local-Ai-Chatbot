@@ -301,6 +301,25 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.box.expression('invalid\nCANCEL')
 
+    def test_llm_expression_survives_return_to_listening(self):
+        self.box.status += ' face=1 emojistates=1 emotion=llm moods=1'
+        self.box.expression('listening')
+        self.assertEqual(self.box.serial.commands[-1], 'BOX1 FACE mood_neutral')
+        self.box.expression('mood_laughing')
+        self.box.expression('thinking')
+        self.box.expression('listening')
+        self.assertEqual(self.box.serial.commands[-1], 'BOX1 FACE mood_laughing')
+        self.box.expression('speaking')
+        self.assertEqual(self.box.serial.commands[-1], 'BOX1 FACE mood_laughing')
+        self.box.expression('sleeping')
+        self.box.expression('listening')
+        self.assertEqual(self.box.serial.commands[-1], 'BOX1 FACE mood_laughing')
+
+    def test_legacy_listening_keeps_ear(self):
+        self.box.status += ' face=1 emotion=legacy moods=0'
+        self.box.expression('listening')
+        self.assertEqual(self.box.serial.commands[-1], 'BOX1 FACE listening')
+
     def test_extra_emoji_states_and_legacy_fallback(self):
         self.box.status += ' face=1'
         self.box.expression('sleeping')

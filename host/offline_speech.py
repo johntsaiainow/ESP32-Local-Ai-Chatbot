@@ -111,10 +111,14 @@ class WhisperRecognizer:
         import numpy as np
         audio = np.frombuffer(pcm, dtype='<i2').astype(np.float32) / 32768.0
         language = None if self.language == 'auto' else self.language.split('-')[0]
+        prompt = 'Mandarin Chinese and English conversation.'
+        wake_words = getattr(self, 'wake_words', ())
+        if wake_words:
+            prompt += ' Names: ' + ', '.join(wake_words) + '.'
         segments, info = self.model.transcribe(
             audio, language=language, task='transcribe', beam_size=self.beam_size,
             temperature=0, condition_on_previous_text=False, vad_filter=True,
-            initial_prompt='Mandarin Chinese and English conversation.')
+            initial_prompt=prompt)
         self.last_language = info.language
         # Do not strip internal spaces: English words may appear inside Chinese.
         text = ' '.join(segment.text.strip() for segment in segments if segment.text.strip())

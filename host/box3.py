@@ -20,6 +20,16 @@ MAX_BYTES = 320000
 LANGUAGES = ('en', 'zh', 'zh-TW', 'ja', 'ko')
 
 
+def scale_playback(pcm, percent):
+    """Attenuate little-endian PCM16 without changing framing or source files."""
+    if percent == 100:
+        return pcm
+    if not 0 <= percent <= 100:
+        raise ValueError('Playback volume must be between 0 and 100')
+    return b''.join(struct.pack('<h', int(sample * percent / 100))
+                    for (sample,) in struct.iter_unpack('<h', pcm))
+
+
 class IncompleteRecording(RuntimeError):
     def __init__(self, audio, expected, status):
         self.audio = audio
@@ -190,12 +200,19 @@ class Box3:
         if not mood and state not in ('happy', 'sad', 'listening', 'thinking', 'speaking', 'music', 'error') and state not in extra_states:
             raise ValueError('Unsupported agent expression')
         fields = self.reply_fields(self.status)
+        llm_mode = fields.get('emotion') == 'llm' and fields.get('moods') == '1'
+        if llm_mode and state in ('listening', 'speaking'):
+            # Keep the model's expression between turns instead of the legacy ear.
+            state = getattr(self, 'last_llm_expression', 'mood_neutral')
+            mood = True
         if mood and fields.get('moods') != '1':
             state = 'speaking'
         if fields.get('face') == '1':
             if fields.get('emojistates') != '1':
                 state = extra_states.get(state, state)
             self.command('FACE ' + state)
+            if llm_mode and mood:
+                self.last_llm_expression = state
 
     def display(self, text, language='en'):
         encoded = text.encode('utf-8')
@@ -318,6 +335,42 @@ class Box3:
             raise RuntimeError(f'{incomplete} Partial WAV saved to {output}; '
                                'this is a diagnostic recording, not a complete capture.') from incomplete
 
+    def battery(self):
+        if self.reply_fields(self.status).get('battery') != '1':
+            raise ValueError('Enable BOX-3-SENSOR dock and battery sensing in configure.py, then rebuild/upload')
+        _, reply = self.command('BATTERY')
+        fields = self.reply_fields(reply)
+        try:
+            millivolts = int(fields['battery_mv'])
+            percent = int(fields['percent_estimate'])
+            if not 0 <= millivolts <= 14000 or not -1 <= percent <= 100:
+                raise ValueError()
+            if fields['presence'] != 'unknown' or fields['charging'] != 'unknown':
+                raise ValueError()
+        except (KeyError, ValueError) as exc:
+            raise ValueError('Invalid battery voltage reply') from exc
+        return dict(millivolts=millivolts, percent_estimate=None if percent == -1 else percent,
+                    presence='unknown', charging='unknown')
+
+    def environment(self):
+        capability = self.reply_fields(self.status).get('environment')
+        if capability != '1':
+            raise ValueError('Temperature/humidity requires updated BOX-3 firmware: select BOX-3-SENSOR dock and enable temperature/humidity in configure.py, then rebuild/upload')
+        try:
+            _, reply = self.command('SENSOR')
+        except RuntimeError as exc:
+            raise ValueError(f'BOX-3 sensor unavailable; check the BOX-3-SENSOR dock: {exc}') from exc
+        fields = self.reply_fields(reply)
+        try:
+            temperature = float(fields['temperature_c'])
+            humidity = float(fields['humidity_pct'])
+        except (KeyError, ValueError) as exc:
+            raise ValueError('Invalid temperature/humidity reply') from exc
+        if not (math.isfinite(temperature) and -50 <= temperature <= 150 and
+                math.isfinite(humidity) and 0 <= humidity <= 100):
+            raise ValueError('Invalid temperature/humidity range')
+        return temperature, humidity
+
     def play(self, path, progress=None):
         if self.reply_fields(self.status).get('speaker') == '0':
             raise RuntimeError('BOX-3 speaker codec initialization failed; check firmware startup logs')
@@ -329,6 +382,7 @@ class Box3:
                 pcm = wav.readframes(wav.getnframes() if streaming else MAX_BYTES // 2)
                 if not pcm:
                     break
+                pcm = scale_playback(pcm, getattr(self, 'playback_volume', 100))
                 try:
                     _, start_ack = self.command(f"{'STREAM' if streaming else 'PLAY'} {len(pcm)}")
                     start_fields = self.reply_fields(start_ack)
@@ -417,14 +471,24 @@ class Box3Connection:
         self.stream_capture = stream_capture
         self.active = preferred
         self.device = None
+        self.playback_volume = 100
         self._open(preferred)
+
+    def set_volume(self, percent):
+        if type(percent) is not int or not 0 <= percent <= 100:
+            raise ValueError('Playback volume must be between 0 and 100')
+        self.playback_volume = percent
+        self.device.playback_volume = percent
 
     def __getattr__(self, name):
         return getattr(self.device, name)
 
     def _open(self, transport):
         device = self.factory(self.endpoints[transport])
+        if self.device is not None and 'last_llm_expression' in vars(self.device):
+            device.last_llm_expression = self.device.last_llm_expression
         device.stream_capture = self.stream_capture
+        device.playback_volume = self.playback_volume
         try:
             supports_link = Box3.reply_fields(device.status).get('link') == '1'
             if len(self.endpoints) > 1 and not supports_link:
@@ -524,6 +588,8 @@ def main():
     parser.add_argument('--port', default=os.environ.get('BOX3_PORT'))
     sub = parser.add_subparsers(dest='action', required=True)
     sub.add_parser('status')
+    sub.add_parser('sensor', help='Read BOX-3-SENSOR temperature and humidity')
+    sub.add_parser('battery', help='Read BOX-3-SENSOR battery voltage and estimated percentage')
     sub.add_parser('speaker-test', help='Play a one-second test tone without Piper or Pi')
     for action in ('display', 'say'):
         command = sub.add_parser(action)
@@ -544,6 +610,11 @@ def main():
     try:
         if args.action == 'status':
             print(box.command('PING')[1])
+        elif args.action == 'battery':
+            print(json.dumps(box.battery()))
+        elif args.action == 'sensor':
+            temperature, humidity = box.environment()
+            print(f'Temperature: {temperature:.1f} C | Humidity: {humidity:.1f}% RH')
         elif args.action == 'speaker-test':
             with tempfile.TemporaryDirectory(prefix='box3-tone-') as temp:
                 path = Path(temp) / 'tone.wav'

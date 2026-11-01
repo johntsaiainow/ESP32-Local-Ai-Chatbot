@@ -35,3 +35,23 @@ if wifi == 'off':
     repeater = 'off'
 env.Append(CPPDEFINES=[('OSIRIS_WIFI_REPEATER', int(repeater == 'on'))])
 print('Osiris Wi-Fi repeater: ' + repeater)
+
+sensor = os.environ.get('OSIRIS_BOX3_ENVIRONMENT')
+if sensor is None:
+    enabled = (isinstance(saved, dict) and saved.get('env') == 'esp32s3box3'
+               and saved.get('sensor_dock') is True and saved.get('environment_sensor') is True)
+    sensor = 'on' if enabled else 'off'
+if sensor not in ('on', 'off'):
+    raise ValueError('OSIRIS_BOX3_ENVIRONMENT must be on or off')
+env.Append(CPPDEFINES=[('OSIRIS_BOX3_ENVIRONMENT', int(sensor == 'on'))])
+print('Osiris BOX-3 temperature/humidity: ' + sensor)
+
+battery = os.environ.get('OSIRIS_BOX3_BATTERY')
+if battery is None:
+    enabled = (isinstance(saved, dict) and saved.get('env') == 'esp32s3box3'
+               and saved.get('sensor_dock') is True and saved.get('battery_sensor') is True)
+    battery = 'on' if enabled else 'off'
+if battery not in ('on', 'off'):
+    raise ValueError('OSIRIS_BOX3_BATTERY must be on or off')
+env.Append(CPPDEFINES=[('OSIRIS_BOX3_BATTERY', int(battery == 'on'))])
+print('Osiris BOX-3 battery voltage/estimate: ' + battery)
